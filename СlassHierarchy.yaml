@@ -3,17 +3,18 @@ classes:
     description: "Базовый класс Qt для главного окна приложения"
     attributes:
       - "centralWidget"
+      - "windowTitle"
       - "menuBar"
       - "statusBar"
-      - "windowTitle"
 
-    MainWindow:
-      inherits: QMainWindow
-      description: "Главное окно приложения"
-      adds:
-        - "mainLayout: QVBoxLayout"
-        - "currentPage: BasePage"
-        - "mainNavigationWidget: QWidget"
+  MainWindow:
+    inherits: QMainWindow
+    description: "Главное окно приложения"
+    adds:
+      - "mainNavigationWidget: QWidget"
+      - "currentPage: BasePage"
+      - "centralWidget: QWidget"
+      - "mainLayout: QVBoxLayout"
 
   QWidget:
     description: "Базовый класс Qt для визуальных элементов интерфейса"
@@ -31,6 +32,7 @@ classes:
       - "pageTitle: QLabel"
       - "mainLayout: QVBoxLayout"
       - "contentWidget: QWidget"
+      - "contentLayout: QVBoxLayout"
 
   ElectrolysisProcessPage:
     inherits: BasePage
@@ -41,11 +43,11 @@ classes:
 
   ServicePageBase:
     inherits: BasePage
-    description: "Базовый класс для всех страниц сервисного управления"
+    description: "Базовый заготовочный класс для всех страниц сервисного управления"
     adds:
       - "servicePageLayout: QVBoxLayout"
       - "serviceContentWidget: QWidget"
-      - "servicePageName: string"
+      - "serviceContentLayout: QVBoxLayout"
 
   AxisControlPage:
     inherits: ServicePageBase
@@ -54,6 +56,7 @@ classes:
       - "xControl: ParameterControlWidget"
       - "yControl: ParameterControlWidget"
       - "zControl: ParameterControlWidget"
+      - "axisLayout: QVBoxLayout"
 
   JointControlPage:
     inherits: ServicePageBase
@@ -65,22 +68,27 @@ classes:
       - "j3Control: CompactParameterControlWidget"
       - "j4Control: CompactParameterControlWidget"
       - "j5Control: CompactParameterControlWidget"
+      - "jointLayout: QGridLayout"
 
   TrajectoryPage:
     inherits: ServicePageBase
     description: "Страница задания траектории по координатам X, Y, Z"
     adds:
       - "pointInputWidget: TrajectoryPointInputWidget"
+      - "pointActionsWidget: PointActionsWidget"
+      - "coordinatesListWidget: CoordinatesListWidget"
       - "trajectoryPreviewWidget: TrajectoryPreviewWidget"
-      - "pointsListWidget: CoordinatesListWidget"
+      - "trajectoryPageLayout: QVBoxLayout"
 
   JointTrajectoryPage:
     inherits: ServicePageBase
     description: "Страница задания траектории по суставам J0-J5"
     adds:
       - "pointInputWidget: JointTrajectoryPointInputWidget"
+      - "pointActionsWidget: PointActionsWidget"
+      - "coordinatesListWidget: CoordinatesListWidget"
       - "trajectoryPreviewWidget: TrajectoryPreviewWidget"
-      - "pointsListWidget: CoordinatesListWidget"
+      - "jointTrajectoryPageLayout: QVBoxLayout"
 
   LaserControlPage:
     inherits: ServicePageBase
@@ -91,8 +99,8 @@ classes:
       - "focusOffsetControl: ParameterControlWidget"
       - "pulseDurationControl: ParameterControlWidget"
       - "exposureTimeControl: ParameterControlWidget"
-      - "laserModeWidget: QWidget"
-      - "laserPageLayout: QVBoxLayout"
+      - "laserModeWidget: LaserModeWidget"
+      - "laserPageLayout: QGridLayout"
 
   WorkParametersPage:
     inherits: ServicePageBase
@@ -105,13 +113,13 @@ classes:
     inherits: ServicePageBase
     description: "Страница управления эрозией и водой"
     adds:
-      - "erosionControlGroup: BaseControlWidget"
-      - "waterControlGroup: BaseControlWidget"
+      - "erosionControlGroup: ControlButtonGroupWidget"
+      - "waterControlGroup: ControlButtonGroupWidget"
       - "erosionWaterLayout: QVBoxLayout"
 
   BaseControlWidget:
     inherits: QWidget
-    description: "Базовый класс для всех управляющих и вспомогательных виджетов"
+    description: "Базовый класс для управляющих и вспомогательных виджетов"
     adds:
       - "titleLabel: QLabel"
       - "widgetLayout: QLayout"
@@ -147,13 +155,16 @@ classes:
 
   BasePointInputWidget:
     inherits: BaseControlWidget
-    description: "Базовый класс для задания точки"
+    description: "Базовый класс для задания параметров одной точки"
     adds:
       - "inputGridLayout: QGridLayout"
       - "labels: list"
       - "valueLabels: list"
-      - "incrementButtons: list"
-      - "decrementButtons: list"
+      - "plusOneButtons: list"
+      - "minusOneButtons: list"
+      - "plusTenButtons: list"
+      - "minusTenButtons: list"
+      - "pointValues: list"
 
   TrajectoryPointInputWidget:
     inherits: BasePointInputWidget
@@ -177,6 +188,35 @@ classes:
       - "j4Label: QLabel"
       - "j5Label: QLabel"
       - "jointValues: list"
+
+  PointActionsWidget:
+    inherits: BaseControlWidget
+    description: "Виджет действий над точками траектории"
+    adds:
+      - "addPointButton: QPushButton"
+      - "deletePointButton: QPushButton"
+      - "clearAllButton: QPushButton"
+      - "returnToZeroButton: QPushButton"
+      - "actionsLayout: QHBoxLayout"
+
+  LaserModeWidget:
+    inherits: BaseControlWidget
+    description: "Виджет выбора режима работы лазера"
+    adds:
+      - "modeTitleLabel: QLabel"
+      - "continuousModeButton: QPushButton"
+      - "pulseModeButton: QPushButton"
+      - "singlePulseModeButton: QPushButton"
+      - "selectedMode: string"
+      - "modeLayout: QVBoxLayout"
+
+  ControlButtonGroupWidget:
+    inherits: BaseControlWidget
+    description: "Универсальный кнопочный блок для групп команд управления"
+    adds:
+      - "groupTitleLabel: QLabel"
+      - "commandButtons: list"
+      - "groupLayout: QVBoxLayout"
 
   TrajectoryPreviewWidget:
     inherits: BaseControlWidget
