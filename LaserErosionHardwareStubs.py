@@ -747,9 +747,6 @@ if __name__ == "__main__":
     controller = LaserErosionRobotController()
     print(controller.get_system_status())
 
-    # Внешние условия, которые контроллер сам не создаёт:
-    # 1) AC/DC уже включён извне и питает контроллер;
-    # 2) крышка закрыта оператором, датчик только сообщает это состояние.
     controller.ac_dc_converter.turn_on()
     controller.lid_sensor.set_lid_state(True)
 

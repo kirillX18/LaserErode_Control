@@ -1,16 +1,16 @@
-# This is a sample Python script.
-
-# Press Shift+F10 to execute it or replace it with your code.
-# Press Double Shift to search everywhere for classes, files, tool windows, actions, and settings.
+from LaserErosionHardwareStubs import LaserErosionRobotController
 
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
-
-
-# Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    print_hi('PyCharm')
+    controller = LaserErosionRobotController()
+    print(controller.get_system_status())
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    controller.ac_dc_converter.turn_on()
+    controller.lid_sensor.set_lid_state(True)
+
+    controller.initialize()
+    controller.move_motor_to(300)
+    controller.start_process()
+    print(controller.get_system_status())
+    controller.set_temperature_mock(75)
+    print(controller.get_system_status())
