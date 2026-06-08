@@ -1,0 +1,1151 @@
+---
+# Иерархия классов приложения «Управление лазерно-эрозионным роботом».
+# Формат: external_classes -> категории классов проекта (inherits/описание/
+# атрибуты/методы/сигналы) -> inheritance_tree -> composition_tree.
+# Включены ВСЕ классы проекта (61).
+
+external_classes:
+  QtCore.QObject:
+    description: "Базовый класс Qt для объектов с сигналами и слотами."
+
+  QtWidgets.QWidget:
+    inherits: QtCore.QObject
+    description: "Базовый класс Qt для всех визуальных элементов."
+
+  QtWidgets.QMainWindow:
+    inherits: QtWidgets.QWidget
+    description: "Главное окно приложения Qt."
+
+  QtWidgets.QFrame:
+    inherits: QtWidgets.QWidget
+    description: "Рамочный контейнер; база панелей и групп."
+
+  QtWidgets.QGroupBox:
+    inherits: QtWidgets.QFrame
+    description: "Группа с рамкой и заголовком; база панелей-блоков."
+
+  QtWidgets.QLabel:
+    inherits: QtWidgets.QFrame
+    description: "Текстовая/графическая метка."
+
+  QtWidgets.QAbstractButton:
+    inherits: QtWidgets.QWidget
+    description: "Абстрактная кнопка Qt."
+
+  QtWidgets.QPushButton:
+    inherits: QtWidgets.QAbstractButton
+    description: "Нажимаемая кнопка."
+
+  QtWidgets.QProgressBar:
+    inherits: QtWidgets.QWidget
+    description: "Горизонтальный индикатор-шкала."
+
+  QtWidgets.QTabWidget:
+    inherits: QtWidgets.QWidget
+    description: "Виджет вкладок."
+
+  logging.Handler:
+    description: "Базовый обработчик стандартного модуля logging."
+
+  enum.Enum:
+    description: "Базовый класс перечислений стандартной библиотеки."
+
+  builtins.str:
+    description: "Встроенный строковый тип (для строкового Enum)."
+
+application:
+  MainWindow:
+    inherits: QtWidgets.QMainWindow
+    description: "Главное окно: шапка, строка общего состояния и верхние вкладки страниц."
+    attributes:
+      - "pages: dict"
+      - "status_bar: MasterStatusBar"
+      - "tabs: QTabWidget"
+      - "_ctl: controller"
+      - "_monitor: QTimer"
+    methods:
+      - "__init__()"
+      - "_setup_ui() -> None"
+      - "_update_status_bar() -> None"
+      - "show_page(title: str) -> None"
+
+base_classes:
+  BasePanel:
+    inherits: QtWidgets.QGroupBox
+    description: "Базовая панель-блок."
+    attributes:
+      - "body: QVBoxLayout"
+    methods:
+      - "__init__(title: str, parent)"
+      - "build() -> None"
+
+  BasePage:
+    inherits: QtWidgets.QWidget
+    description: "Базовая страница верхнего уровня."
+    class_attributes:
+      - "title: str"
+    attributes:
+      - "_layout: QVBoxLayout"
+    methods:
+      - "__init__(parent)"
+      - "build_content(layout: QVBoxLayout) -> None"
+
+  BaseServiceTab:
+    inherits: QtWidgets.QWidget
+    description: "Базовая вкладка сервисного управления (простой вертикальный контент)."
+    attributes:
+      - "content: QVBoxLayout"
+    methods:
+      - "__init__(parent)"
+      - "build_content(layout: QVBoxLayout) -> None"
+
+components:
+  _RoleButton:
+    inherits: QtWidgets.QPushButton
+    description: "Базовая кнопка с семантической ролью (определяет стиль через QSS)."
+    class_attributes:
+      - "role: str"
+      - "max_width: int | None"
+      - "_REST"
+      - "_HOVER"
+      - "_PRESS"
+      - "_DURATION_HOVER"
+      - "_DURATION_PRESS"
+    attributes:
+      - "_shadow: QGraphicsDropShadowEffect"
+      - "_blur_anim: QPropertyAnimation"
+      - "_offset_anim: QPropertyAnimation"
+    methods:
+      - "__init__(text: str, parent)"
+      - "_elevate(target: tuple[float, float], duration: int) -> None"
+      - "enterEvent(event)"
+      - "leaveEvent(event)"
+      - "mousePressEvent(event)"
+      - "mouseReleaseEvent(event)"
+      - "changeEvent(event)"
+
+  PrimaryButton:
+    inherits: _RoleButton
+    description: "Зелёная кнопка по умолчанию (основное действие)."
+    class_attributes:
+      - "role"
+
+  DangerButton:
+    inherits: _RoleButton
+    description: "Широкая красная кнопка (например, «Вернуться в нулевое положение»)."
+    class_attributes:
+      - "role"
+
+  SmallButton:
+    inherits: _RoleButton
+    description: "Компактная зелёная кнопка шага (+1 / +10)."
+    class_attributes:
+      - "role"
+      - "max_width"
+
+  RedButton:
+    inherits: _RoleButton
+    description: "Компактная красная кнопка (например, «−» в блоках суставов)."
+    class_attributes:
+      - "role"
+      - "max_width"
+
+  GrayButton:
+    inherits: _RoleButton
+    description: "Серая нейтральная кнопка («Назад»)."
+    class_attributes:
+      - "role"
+      - "max_width"
+
+  SectionTitle:
+    inherits: QtWidgets.QLabel
+    description: "Синий жирный заголовок секции (например, «Визуализация G-code»)."
+    methods:
+      - "__init__(text: str, parent)"
+
+  ValueLabel:
+    inherits: QtWidgets.QLabel
+    description: "Метка для отображения текущего значения (по центру, моноширинно-ровно)."
+    methods:
+      - "__init__(text: str, parent)"
+      - "set_value(value) -> None"
+
+  StatusDot:
+    inherits: QtWidgets.QLabel
+    description: "Маленький цветной кружок-индикатор."
+    attributes:
+      - "_size"
+    methods:
+      - "__init__(state: str, size: int, parent)"
+      - "set_state(state: str) -> None"
+
+  StatusBadge:
+    inherits: QtWidgets.QLabel
+    description: "Текстовая «пилюля» состояния (цвет + подпись)."
+    methods:
+      - "__init__(text: str, state: str, parent)"
+      - "set_state(text: str, state: str) -> None"
+
+  MetricRow:
+    inherits: QtWidgets.QWidget
+    description: "Строка «подпись … значение» с возможностью подкрасить значение."
+    attributes:
+      - "_key: QLabel"
+      - "_val: QLabel"
+    methods:
+      - "__init__(label: str, value: str, parent)"
+      - "set_value(value, state: str | None) -> None"
+
+  MeterBar:
+    inherits: QtWidgets.QProgressBar
+    description: "Горизонтальная шкала 0…100 % с цветом по состоянию."
+    methods:
+      - "__init__(kind: str, parent)"
+      - "set_kind(kind: str) -> None"
+      - "set_fraction(fraction: float) -> None"
+
+  IndicatorRow:
+    inherits: QtWidgets.QWidget
+    description: "Строка-индикатор: [точка] подпись … [состояние]."
+    attributes:
+      - "dot: StatusDot"
+      - "_key: QLabel"
+      - "_val: QLabel"
+    methods:
+      - "__init__(label: str, parent)"
+      - "set_state(state: str, text: str) -> None"
+
+  LastMessageBar:
+    inherits: QtWidgets.QLabel
+    description: "Компактная строка последнего сообщения/результата операции."
+    methods:
+      - "__init__(parent)"
+      - "_apply(level: str) -> None"
+      - "set_message(level: str, text: str) -> None"
+
+  StepRow:
+    inherits: QtWidgets.QWidget
+    description: "Одна строка шага: подпись, кнопка «минус» и кнопка «плюс»."
+    methods:
+      - "__init__(label: str, step: float, on_step: Callable[[float], None], minus_text: str, plus_text: str, minus_red: bool, label_first: bool, parent)"
+
+  StepControl:
+    inherits: QtWidgets.QWidget
+    description: "Группа строк шага. Принимает список величин шага и общий колбэк."
+    methods:
+      - "__init__(steps: Iterable[float], on_step: Callable[[float], None], label_fmt: str, label_first: bool, minus_red: bool, signed_labels: bool, parent)"
+
+blocks:
+  QuickActionBar:
+    inherits: BasePanel
+    description: "Горизонтальная панель быстрых действий процесса."
+    attributes:
+      - "init_button: GrayButton"
+      - "start_button: PrimaryButton"
+      - "stop_button: PrimaryButton"
+      - "estop_button: DangerButton"
+    methods:
+      - "build() -> None"
+      - "set_enabled_states(can_start: bool, can_stop: bool) -> None"
+
+  ParameterForm:
+    inherits: BasePanel
+    description: "Форма числовых параметров: строка = подпись + поле + кнопка действия."
+    attributes:
+      - "grid: QGridLayout"
+      - "_row: int"
+      - "fields: dict[str, QDoubleSpinBox]"
+    methods:
+      - "build() -> None"
+      - "add_row(key: str, label: str, lo: float, hi: float, value: float, step: float, decimals: int, suffix: str, button: str, callback: Callable[[float], None]) -> None"
+      - "set_range(key: str, lo: float, hi: float) -> None"
+      - "set_value(key: str, value: float) -> None"
+      - "sync(key: str, value: float) -> None"
+
+  TestHarnessPanel:
+    inherits: BasePanel
+    description: "Имитация сигналов датчиков (крышка, температура, ток). В реальной"
+    attributes:
+      - "lid_check: QCheckBox"
+      - "temp_spin: self._spin"
+      - "curr_spin: self._spin"
+      - "temp_button: PrimaryButton"
+      - "curr_button: PrimaryButton"
+    methods:
+      - "build() -> None"
+      - "_spin(lo, hi, value, suffix, decimals, step)"
+
+  DeviceCard:
+    inherits: BasePanel
+    description: "Карточка узла: шапка с бейджем, метрики, шкалы, кнопки."
+    attributes:
+      - "_subtitle"
+      - "_metrics: dict[str, MetricRow]"
+      - "_bars: dict[str, MeterBar]"
+      - "dot: StatusDot"
+      - "badge: StatusBadge"
+      - "_metrics_box: QWidget"
+      - "_metrics_layout: QVBoxLayout"
+      - "_actions_row: QHBoxLayout | None"
+    methods:
+      - "__init__(title: str, subtitle: str, parent)"
+      - "build() -> None"
+      - "add_metric(key: str, label: str, value: str) -> MetricRow"
+      - "add_bar(key: str, kind: str) -> MeterBar"
+      - "add_action(text: str, callback: Callable, role: str) -> None"
+      - "set_metric(key: str, value, state: str | None) -> None"
+      - "set_bar(key: str, fraction: float, kind: str | None) -> None"
+      - "set_state(badge_text: str, state: str) -> None"
+
+  MasterStatusBar:
+    inherits: QtWidgets.QWidget
+    description: "Строка общего состояния: бейджи + часы."
+    attributes:
+      - "acdc: StatusBadge"
+      - "init: StatusBadge"
+      - "proc: StatusBadge"
+      - "alarm: StatusBadge"
+      - "clock: QLabel"
+      - "_timer: QTimer"
+    methods:
+      - "__init__(parent)"
+      - "_tick() -> None"
+      - "update_from(snap: dict, alarms: list) -> None"
+
+  AlarmPanel:
+    inherits: BasePanel
+    description: "Список активных аварий и предупреждений."
+    attributes:
+      - "list: QListWidget"
+    methods:
+      - "build() -> None"
+      - "set_alarms(alarms: list) -> None"
+
+  EventLogPanel:
+    inherits: BasePanel
+    description: "Журнал событий (подписан на логгер «hardware» через контроллер)."
+    class_attributes:
+      - "LEVEL_COLORS"
+    attributes:
+      - "view: QPlainTextEdit"
+      - "clear_button: PrimaryButton"
+    methods:
+      - "build() -> None"
+      - "append(level: str, text: str) -> None"
+
+  DiagnosticsPanel:
+    inherits: BasePanel
+    description: "Полный текстовый статус системы (get_system_status())."
+    attributes:
+      - "view: QPlainTextEdit"
+      - "refresh_button: PrimaryButton"
+    methods:
+      - "build() -> None"
+      - "set_status(text: str) -> None"
+
+pages:
+  HardwarePage:
+    inherits: BasePage
+    page_title: "Узлы оборудования"
+    description: "—"
+    class_attributes:
+      - "title"
+    attributes:
+      - "ctl: controller"
+      - "cards: dict[str, DeviceCard]"
+      - "quick: QuickActionBar"
+      - "alarms: AlarmPanel"
+      - "diag: DiagnosticsPanel"
+      - "log: EventLogPanel"
+      - "harness: TestHarnessPanel"
+    methods:
+      - "build_content(layout: QVBoxLayout) -> None"
+      - "_build_left() -> QWidget"
+      - "_build_cards(grid: QGridLayout) -> None"
+      - "_build_right() -> QWidget"
+      - "_wire() -> None"
+      - "_refresh() -> None"
+
+  _ConditionsPanel:
+    inherits: BasePanel
+    description: "Чек-лист условий запуска процесса (_check_start_conditions)."
+    attributes:
+      - "r_acdc: IndicatorRow"
+      - "r_init: IndicatorRow"
+      - "r_lid: IndicatorRow"
+      - "r_tank: IndicatorRow"
+      - "r_temp: IndicatorRow"
+    methods:
+      - "build() -> None"
+
+  _ProcessReadouts:
+    inherits: BasePanel
+    description: "Ключевые параметры процесса (живые значения)."
+    attributes:
+      - "m_proc: MetricRow"
+      - "m_v: MetricRow"
+      - "m_i: MetricRow"
+      - "m_volt: MetricRow"
+      - "m_temp: MetricRow"
+      - "m_pos: MetricRow"
+      - "m_vibro: MetricRow"
+    methods:
+      - "build() -> None"
+
+  ProcessPage:
+    inherits: BasePage
+    page_title: "Процесс"
+    description: "—"
+    class_attributes:
+      - "title"
+    attributes:
+      - "ctl: controller"
+      - "quick: QuickActionBar"
+      - "conditions: _ConditionsPanel"
+      - "readouts: _ProcessReadouts"
+      - "alarms: AlarmPanel"
+      - "log: EventLogPanel"
+    methods:
+      - "build_content(layout: QVBoxLayout) -> None"
+      - "_refresh() -> None"
+
+  ServiceControlTabs:
+    inherits: QtWidgets.QTabWidget
+    description: "Контейнер вкладок сервисного управления (строится из реестра)."
+    attributes:
+      - "tabs: dict"
+    methods:
+      - "__init__(parent)"
+
+  ServiceControlPage:
+    inherits: BasePage
+    page_title: "Сервисное управление"
+    description: "—"
+    class_attributes:
+      - "title"
+    attributes:
+      - "tabs_widget: ServiceControlTabs"
+    methods:
+      - "build_content(layout: QVBoxLayout) -> None"
+
+service_tabs:
+  _TankPanel:
+    inherits: BasePanel
+    description: "—"
+    attributes:
+      - "fill: PrimaryButton"
+      - "drain: GrayButton"
+      - "connect: PrimaryButton"
+      - "disconnect: GrayButton"
+      - "m_filled: MetricRow"
+      - "m_elec: MetricRow"
+      - "m_ready: MetricRow"
+      - "m_volt: MetricRow"
+    methods:
+      - "build() -> None"
+
+  _SourcePanel:
+    inherits: BasePanel
+    description: "—"
+    attributes:
+      - "m_v: MetricRow"
+      - "m_i: MetricRow"
+      - "m_lim: MetricRow"
+      - "limit: QDoubleSpinBox"
+      - "set_limit: PrimaryButton"
+    methods:
+      - "build() -> None"
+
+  _StatePanel:
+    inherits: BasePanel
+    description: "—"
+    attributes:
+      - "m_proc: MetricRow"
+      - "m_vibro: MetricRow"
+    methods:
+      - "build() -> None"
+
+  ErosionPolishTab:
+    inherits: BaseServiceTab
+    tab_title: "Эрозия и полировка"
+    description: "—"
+    attributes:
+      - "ctl: controller"
+      - "tank: _TankPanel"
+      - "source: _SourcePanel"
+      - "state: _StatePanel"
+      - "status_line: LastMessageBar"
+    methods:
+      - "build_content(layout: QVBoxLayout) -> None"
+      - "_confirm_drain() -> None"
+      - "_confirm_disconnect() -> None"
+      - "_refresh() -> None"
+
+  _LaserParamPanel:
+    inherits: BasePanel
+    description: "Блок одного параметра лазера: поле ввода значения, кнопки шага и «Задать»."
+    attributes:
+      - "_title_text"
+      - "_value: int"
+      - "_on_apply"
+      - "value_row: MetricRow"
+      - "spin: QSpinBox"
+      - "apply_btn: PrimaryButton"
+      - "steps: StepControl"
+    methods:
+      - "__init__(title: str, lo: int, hi: int, on_apply, parent)"
+      - "build() -> None"
+      - "_step(delta: float) -> None"
+      - "_apply() -> None"
+      - "value() -> int"
+
+  _ModePanel:
+    inherits: BasePanel
+    description: "Блок «Режим работы»: три взаимоисключающих режима с квадратным переключателем."
+    class_attributes:
+      - "MODES"
+      - "_SQUARE"
+    attributes:
+      - "_on_change"
+      - "group: QButtonGroup"
+    methods:
+      - "__init__(on_change, parent)"
+      - "build() -> None"
+      - "_changed(btn) -> None"
+      - "current_mode() -> str"
+
+  LaserControlTab:
+    inherits: BaseServiceTab
+    tab_title: "Лазером"
+    description: "Вкладка «Лазером»: параметры воздействия слева, режим излучения справа."
+    class_attributes:
+      - "PARAM_SPECS"
+    attributes:
+      - "params: dict[str, _LaserParamPanel]"
+      - "mode: _ModePanel"
+      - "status_line: LastMessageBar"
+    methods:
+      - "build_content(layout: QVBoxLayout) -> None"
+      - "_apply_param(name: str, value: int) -> None"
+      - "_mode_changed(mode_text: str) -> None"
+
+  MotorControlTab:
+    inherits: BaseServiceTab
+    tab_title: "Шаговый привод"
+    description: "—"
+    class_attributes:
+      - "JOG_STEPS"
+    attributes:
+      - "ctl: controller"
+      - "current_row: MetricRow"
+      - "pos_bar: MeterBar"
+      - "range_row: MetricRow"
+      - "target: QSpinBox"
+      - "move_btn: PrimaryButton"
+      - "speed_row: MetricRow"
+      - "speed: QSpinBox"
+      - "set_speed_btn: PrimaryButton"
+      - "state_row: MetricRow"
+      - "reset_btn: GrayButton"
+      - "stop_btn: GrayButton"
+      - "status_line: LastMessageBar"
+    methods:
+      - "build_content(layout: QVBoxLayout) -> None"
+      - "_jog(delta: float) -> None"
+      - "_refresh() -> None"
+
+  _CurrentValues:
+    inherits: BasePanel
+    description: "Сводка текущих значений параметров (только чтение)."
+    attributes:
+      - "m_limit: MetricRow"
+      - "m_temp: MetricRow"
+      - "m_speed: MetricRow"
+    methods:
+      - "build() -> None"
+
+  ParametersTab:
+    inherits: BaseServiceTab
+    tab_title: "Параметры устройства"
+    description: "—"
+    attributes:
+      - "ctl: controller"
+      - "values: _CurrentValues"
+      - "form: ParameterForm"
+      - "status_line: LastMessageBar"
+    methods:
+      - "build_content(layout: QVBoxLayout) -> None"
+      - "_refresh() -> None"
+
+hardware_bridge:
+  DeviceController:
+    inherits: QtCore.QObject
+    description: "Фасад над HardwareRegistry + ProcessController + TestHarness."
+    signals:
+      - "logMessage(str, str)"
+      - "stateChanged()"
+    attributes:
+      - "hw: HardwareRegistry"
+      - "process: ProcessController"
+      - "test: TestHarness"
+      - "_handler: _SignalLogHandler"
+    methods:
+      - "__init__(parent)"
+      - "initialize()"
+      - "start_process()"
+      - "stop_process()"
+      - "emergency_stop()"
+      - "set_current_limit(v)"
+      - "set_speed(v)"
+      - "move_to(v)"
+      - "set_max_temp(v)"
+      - "set_load_power(on)"
+      - "reset_motor()"
+      - "stop_motor()"
+      - "set_channel(channel: TransistorChannel, on: bool)"
+      - "acdc_on()"
+      - "acdc_off()"
+      - "fill_tank()"
+      - "drain_tank()"
+      - "connect_electrodes()"
+      - "disconnect_electrodes()"
+      - "set_lid(closed)"
+      - "set_temperature(v)"
+      - "simulate_current(v)"
+      - "poll() -> None"
+      - "system_status() -> str"
+      - "snapshot() -> dict"
+      - "alarms() -> list"
+      - "_do(fn, *args)"
+
+  _SignalLogHandler:
+    inherits: logging.Handler
+    description: "Перенаправляет записи логгера «hardware» в сигнал Qt."
+    attributes:
+      - "_controller"
+    methods:
+      - "__init__(controller: 'DeviceController')"
+      - "emit(record: logging.LogRecord) -> None"
+
+hardware_stubs:
+  TransistorChannel:
+    inherits: builtins.str, enum.Enum
+    description: "Каналы блока транзисторных ключей."
+    class_attributes:
+      - "VIBRO_TABLE"
+      - "POWER_48V"
+      - "POLISHING"
+
+  AcDcConverterStub:
+    inherits: object
+    description: "AC/DC преобразователь 220 В -> 24 В."
+    attributes:
+      - "name: str"
+      - "powered_on: bool"
+      - "input_voltage: int"
+      - "output_voltage: int"
+    methods:
+      - "__init__(initially_on: bool)"
+      - "turn_on() -> bool"
+      - "turn_off() -> bool"
+      - "is_on() -> bool"
+      - "get_input_voltage() -> int"
+      - "get_output_voltage() -> int"
+      - "get_status() -> str"
+
+  TransistorSwitchBlockStub:
+    inherits: object
+    description: "Блок транзисторных ключей."
+    attributes:
+      - "name: str"
+      - "common_ground: bool"
+      - "load_power_enabled: bool"
+      - "channels: dict[TransistorChannel, dict]"
+    methods:
+      - "__init__()"
+      - "set_load_power(state: bool) -> bool"
+      - "set_control_signal(channel: TransistorChannel, signal: int) -> bool"
+      - "turn_on(channel: TransistorChannel) -> bool"
+      - "turn_off(channel: TransistorChannel) -> bool"
+      - "turn_off_all() -> bool"
+      - "is_channel_on(channel: TransistorChannel) -> bool"
+      - "is_transistor_open(channel: TransistorChannel) -> bool"
+      - "_update_channel(channel: TransistorChannel) -> None"
+      - "_update_all_channels() -> None"
+      - "get_status() -> str"
+
+  VibroTableStub:
+    inherits: object
+    description: "—"
+    attributes:
+      - "name: str"
+      - "power_supplied: bool"
+    methods:
+      - "__init__()"
+      - "supply_power() -> bool"
+      - "cut_power() -> bool"
+      - "is_vibrating() -> bool"
+      - "get_status() -> str"
+
+  PowerSupply48VStub:
+    inherits: object
+    description: "—"
+    attributes:
+      - "name: str"
+      - "powered_on: bool"
+      - "voltage: float"
+      - "current: float"
+      - "current_limit: float"
+      - "max_current_limit"
+      - "overcurrent_tripped: bool"
+    methods:
+      - "__init__(current_limit: float, max_current_limit: float)"
+      - "turn_on(power_allowed: bool) -> bool"
+      - "turn_off() -> bool"
+      - "is_on() -> bool"
+      - "get_voltage() -> float"
+      - "get_current() -> float"
+      - "check_overcurrent() -> bool"
+      - "set_current_limit(value: float) -> bool"
+      - "simulate_current_draw(value: float) -> bool"
+      - "get_status() -> str"
+
+  LidSensorStub:
+    inherits: object
+    description: "—"
+    attributes:
+      - "name: str"
+      - "lid_closed: bool"
+    methods:
+      - "__init__(initially_closed: bool)"
+      - "is_closed() -> bool"
+      - "is_open() -> bool"
+      - "set_lid_state(closed: bool) -> bool"
+      - "get_status() -> str"
+
+  StepperMotorDriverStub:
+    inherits: object
+    description: "—"
+    attributes:
+      - "name: str"
+      - "enabled: bool"
+      - "moving: bool"
+      - "speed: int"
+      - "direction: int"
+    methods:
+      - "__init__()"
+      - "enable(power_available: bool) -> bool"
+      - "disable() -> bool"
+      - "set_speed(value: int) -> bool"
+      - "start_motion(direction: int) -> bool"
+      - "stop() -> bool"
+      - "get_status() -> str"
+
+  StepperMotorStub:
+    inherits: object
+    description: "Шаговый двигатель. Движение может быть:"
+    attributes:
+      - "name: str"
+      - "driver: Optional[StepperMotorDriverStub]"
+      - "moving: bool"
+      - "position: int"
+      - "max_position"
+      - "min_position"
+      - "async_motion: bool"
+      - "motion_delay_scale: float"
+      - "_motion_thread: Optional[threading.Thread]"
+      - "_stop_motion: threading.Event"
+    methods:
+      - "__init__(max_position: int, min_position: int)"
+      - "attach_driver(driver: StepperMotorDriverStub) -> bool"
+      - "set_async_motion(enabled: bool, scale: float) -> bool"
+      - "_can_move() -> bool"
+      - "move_to_position(position: int) -> bool"
+      - "move_steps(steps: int) -> bool"
+      - "_do_motion_sync(target: int) -> None"
+      - "_start_async_motion(target: int, steps_count: int) -> None"
+      - "stop() -> bool"
+      - "get_position() -> int"
+      - "reset_position() -> bool"
+      - "get_status() -> str"
+
+  PolishingTankStub:
+    inherits: object
+    description: "—"
+    attributes:
+      - "name: str"
+      - "filled: bool"
+      - "anode_connected: bool"
+      - "cathode_connected: bool"
+      - "process_running: bool"
+      - "applied_voltage: float"
+    methods:
+      - "__init__()"
+      - "fill() -> bool"
+      - "drain() -> bool"
+      - "connect_electrodes() -> bool"
+      - "disconnect_electrodes() -> bool"
+      - "is_ready() -> bool"
+      - "start_process(voltage: float, voltage_applied: bool) -> bool"
+      - "stop_process() -> bool"
+      - "is_process_running() -> bool"
+      - "get_applied_voltage() -> float"
+      - "get_status() -> str"
+
+  TemperatureSensorStub:
+    inherits: object
+    description: "—"
+    attributes:
+      - "name: str"
+      - "temperature: float"
+      - "max_temperature: float"
+    methods:
+      - "__init__(initial: float, max_temperature: float)"
+      - "read_temperature() -> float"
+      - "set_temperature(value: float) -> bool"
+      - "is_overheated() -> bool"
+      - "set_max_temperature(value: float) -> bool"
+      - "get_status() -> str"
+
+  HardwareRegistry:
+    inherits: object
+    description: "Контейнер с устройствами. Сам ничего не решает."
+    attributes:
+      - "ac_dc_converter: AcDcConverterStub"
+      - "transistors: TransistorSwitchBlockStub"
+      - "vibro_table: VibroTableStub"
+      - "power_supply_48v: PowerSupply48VStub"
+      - "lid_sensor: LidSensorStub"
+      - "stepper_driver: StepperMotorDriverStub"
+      - "stepper_motor: StepperMotorStub"
+      - "polishing_tank: PolishingTankStub"
+      - "temperature_sensor: TemperatureSensorStub"
+      - "_initial_stepper_speed"
+      - "_initial_tank_filled"
+      - "_initial_electrodes_connected"
+    methods:
+      - "__init__(stepper_speed: int, current_limit: float, max_temperature: float, initial_temperature: float, tank_filled_at_start: bool, electrodes_connected_at_start: bool, ac_dc_initially_on: bool, lid_initially_closed: bool)"
+      - "apply_initial_state() -> None"
+
+  ProcessController:
+    inherits: object
+    description: "Управление технологическим процессом."
+    attributes:
+      - "hw"
+      - "initialized: bool"
+      - "process_running: bool"
+    methods:
+      - "__init__(hardware: HardwareRegistry)"
+      - "initialize() -> bool"
+      - "_require_initialized() -> bool"
+      - "_check_start_conditions() -> bool"
+      - "start_process() -> bool"
+      - "stop_process() -> bool"
+      - "emergency_stop() -> bool"
+      - "move_motor_to(position: int) -> bool"
+      - "set_motor_speed(speed: int) -> bool"
+      - "check_safety() -> bool"
+      - "get_system_status() -> str"
+
+  TestHarness:
+    inherits: object
+    description: "Утилиты для имитации физических событий, которые в реальной системе"
+    attributes:
+      - "hw"
+      - "process"
+    methods:
+      - "__init__(hardware: HardwareRegistry, process: Optional[ProcessController])"
+      - "set_lid(closed: bool) -> bool"
+      - "set_temperature(value: float) -> bool"
+      - "fill_tank() -> bool"
+      - "drain_tank() -> bool"
+      - "connect_electrodes() -> bool"
+      - "disconnect_electrodes() -> bool"
+      - "simulate_current(value: float) -> bool"
+      - "_notify_process() -> bool"
+
+  LaserErosionRobotController:
+    inherits: object
+    description: "Фасад поверх HardwareRegistry + ProcessController + TestHarness,"
+    attributes:
+      - "hw: HardwareRegistry"
+      - "process: ProcessController"
+      - "test: TestHarness"
+      - "ac_dc_converter"
+      - "transistors"
+      - "vibro_table"
+      - "power_supply_48v"
+      - "lid_sensor"
+      - "stepper_driver"
+      - "stepper_motor"
+      - "polishing_tank"
+      - "temperature_sensor"
+    methods:
+      - "__init__(**kwargs)"
+      - "initialize()"
+      - "start_process()"
+      - "stop_process()"
+      - "emergency_stop()"
+      - "move_motor_to(p)"
+      - "set_stepper_speed(s)"
+      - "read_temperature()"
+      - "is_lid_closed()"
+      - "check_safety_during_process()"
+      - "get_system_status()"
+      - "initialized()"
+      - "process_running()"
+      - "set_lid_state_mock(s)"
+      - "set_temperature_mock(v)"
+      - "fill_tank_mock()"
+      - "drain_tank_mock()"
+      - "connect_electrodes_mock()"
+      - "disconnect_electrodes_mock()"
+
+config:
+  Palette:
+    inherits: object
+    description: "Цвета интерфейса (вынесены, чтобы менять тему централизованно)."
+    class_attributes:
+      - "BG"
+      - "PANEL"
+      - "BORDER"
+      - "GREEN"
+      - "GREEN_HOVER"
+      - "GREEN_PRESSED"
+      - "RED"
+      - "RED_HOVER"
+      - "RED_PRESSED"
+      - "GRAY"
+      - "HEADER_BG"
+      - "TITLE_BLUE"
+      - "TAB_BG"
+      - "OK"
+      - "OK_BG"
+      - "WARN"
+      - "WARN_BG"
+      - "ERR"
+      - "ERR_BG"
+      - "OFF"
+      - "OFF_BG"
+      - "ACCENT"
+      - "VALUE"
+
+inheritance_tree:
+  QtCore.QObject:
+    QtWidgets.QWidget:
+      QtWidgets.QMainWindow:
+        - MainWindow
+      QtWidgets.QFrame:
+        QtWidgets.QGroupBox:
+          BasePanel:
+            - AlarmPanel
+            - DeviceCard
+            - DiagnosticsPanel
+            - EventLogPanel
+            - ParameterForm
+            - QuickActionBar
+            - TestHarnessPanel
+            - _ConditionsPanel
+            - _CurrentValues
+            - _LaserParamPanel
+            - _ModePanel
+            - _ProcessReadouts
+            - _SourcePanel
+            - _StatePanel
+            - _TankPanel
+        QtWidgets.QLabel:
+          - LastMessageBar
+          - SectionTitle
+          - StatusBadge
+          - StatusDot
+          - ValueLabel
+      QtWidgets.QAbstractButton:
+        QtWidgets.QPushButton:
+          _RoleButton:
+            - DangerButton
+            - GrayButton
+            - PrimaryButton
+            - RedButton
+            - SmallButton
+      QtWidgets.QProgressBar:
+        - MeterBar
+      QtWidgets.QTabWidget:
+        - ServiceControlTabs
+      BasePage:
+        - HardwarePage
+        - ProcessPage
+        - ServiceControlPage
+      BaseServiceTab:
+        - ErosionPolishTab
+        - LaserControlTab
+        - MotorControlTab
+        - ParametersTab
+      IndicatorRow: []
+      MasterStatusBar: []
+      MetricRow: []
+      StepControl: []
+      StepRow: []
+    DeviceController: []
+  logging.Handler:
+    - _SignalLogHandler
+  "enum.Enum + builtins.str":
+    - TransistorChannel
+  object:
+    - Palette
+    - AcDcConverterStub
+    - TransistorSwitchBlockStub
+    - VibroTableStub
+    - PowerSupply48VStub
+    - LidSensorStub
+    - StepperMotorDriverStub
+    - StepperMotorStub
+    - PolishingTankStub
+    - TemperatureSensorStub
+    - HardwareRegistry
+    - ProcessController
+    - TestHarness
+    - LaserErosionRobotController
+
+composition_tree:
+  window_navigation:
+    MainWindow:
+      status_bar: MasterStatusBar
+      pages:
+        - "Процесс -> ProcessPage"
+        - "Узлы оборудования -> HardwarePage"
+        - "Сервисное управление -> ServiceControlPage"
+    ServiceControlPage:
+      ServiceControlTabs:
+        - "Шаговый привод -> MotorControlTab"
+        - "Эрозия и полировка -> ErosionPolishTab"
+        - "Лазером -> LaserControlTab"
+        - "Параметры устройства -> ParametersTab"
+  contains:
+    # связи по атрибутам-виджетам, ссылающимся на классы проекта
+    MainWindow:
+      - "status_bar: MasterStatusBar"
+    IndicatorRow:
+      - "dot: StatusDot"
+    _TankPanel:
+      - "fill: PrimaryButton"
+      - "drain: GrayButton"
+      - "connect: PrimaryButton"
+      - "disconnect: GrayButton"
+      - "m_filled: MetricRow"
+      - "m_elec: MetricRow"
+      - "m_ready: MetricRow"
+      - "m_volt: MetricRow"
+    _SourcePanel:
+      - "m_v: MetricRow"
+      - "m_i: MetricRow"
+      - "m_lim: MetricRow"
+      - "set_limit: PrimaryButton"
+    _StatePanel:
+      - "m_proc: MetricRow"
+      - "m_vibro: MetricRow"
+    ErosionPolishTab:
+      - "tank: _TankPanel"
+      - "source: _SourcePanel"
+      - "state: _StatePanel"
+      - "status_line: LastMessageBar"
+    _LaserParamPanel:
+      - "value_row: MetricRow"
+      - "apply_btn: PrimaryButton"
+      - "steps: StepControl"
+    LaserControlTab:
+      - "params: _LaserParamPanel (dict)"
+      - "mode: _ModePanel"
+      - "status_line: LastMessageBar"
+    MotorControlTab:
+      - "current_row: MetricRow"
+      - "pos_bar: MeterBar"
+      - "range_row: MetricRow"
+      - "move_btn: PrimaryButton"
+      - "speed_row: MetricRow"
+      - "set_speed_btn: PrimaryButton"
+      - "state_row: MetricRow"
+      - "reset_btn: GrayButton"
+      - "stop_btn: GrayButton"
+      - "status_line: LastMessageBar"
+    _CurrentValues:
+      - "m_limit: MetricRow"
+      - "m_temp: MetricRow"
+      - "m_speed: MetricRow"
+    ParametersTab:
+      - "values: _CurrentValues"
+      - "form: ParameterForm"
+      - "status_line: LastMessageBar"
+    QuickActionBar:
+      - "init_button: GrayButton"
+      - "start_button: PrimaryButton"
+      - "stop_button: PrimaryButton"
+      - "estop_button: DangerButton"
+    TestHarnessPanel:
+      - "temp_button: PrimaryButton"
+      - "curr_button: PrimaryButton"
+    DeviceCard:
+      - "_metrics: MetricRow (dict)"
+      - "_bars: MeterBar (dict)"
+      - "dot: StatusDot"
+      - "badge: StatusBadge"
+    MasterStatusBar:
+      - "acdc: StatusBadge"
+      - "init: StatusBadge"
+      - "proc: StatusBadge"
+      - "alarm: StatusBadge"
+    EventLogPanel:
+      - "clear_button: PrimaryButton"
+    DiagnosticsPanel:
+      - "refresh_button: PrimaryButton"
+    DeviceController:
+      - "hw: HardwareRegistry"
+      - "process: ProcessController"
+      - "test: TestHarness"
+      - "_handler: _SignalLogHandler"
+    TransistorSwitchBlockStub:
+      - "channels: TransistorChannel (dict)"
+    StepperMotorStub:
+      - "driver: StepperMotorDriverStub"
+    HardwareRegistry:
+      - "ac_dc_converter: AcDcConverterStub"
+      - "transistors: TransistorSwitchBlockStub"
+      - "vibro_table: VibroTableStub"
+      - "power_supply_48v: PowerSupply48VStub"
+      - "lid_sensor: LidSensorStub"
+      - "stepper_driver: StepperMotorDriverStub"
+      - "stepper_motor: StepperMotorStub"
+      - "polishing_tank: PolishingTankStub"
+      - "temperature_sensor: TemperatureSensorStub"
+    LaserErosionRobotController:
+      - "hw: HardwareRegistry"
+      - "process: ProcessController"
+      - "test: TestHarness"
+    HardwarePage:
+      - "cards: DeviceCard (dict)"
+      - "quick: QuickActionBar"
+      - "alarms: AlarmPanel"
+      - "diag: DiagnosticsPanel"
+      - "log: EventLogPanel"
+      - "harness: TestHarnessPanel"
+    _ConditionsPanel:
+      - "r_acdc: IndicatorRow"
+      - "r_init: IndicatorRow"
+      - "r_lid: IndicatorRow"
+      - "r_tank: IndicatorRow"
+      - "r_temp: IndicatorRow"
+    _ProcessReadouts:
+      - "m_proc: MetricRow"
+      - "m_v: MetricRow"
+      - "m_i: MetricRow"
+      - "m_volt: MetricRow"
+      - "m_temp: MetricRow"
+      - "m_pos: MetricRow"
+      - "m_vibro: MetricRow"
+    ProcessPage:
+      - "quick: QuickActionBar"
+      - "conditions: _ConditionsPanel"
+      - "readouts: _ProcessReadouts"
+      - "alarms: AlarmPanel"
+      - "log: EventLogPanel"
+    ServiceControlPage:
+      - "tabs_widget: ServiceControlTabs"
