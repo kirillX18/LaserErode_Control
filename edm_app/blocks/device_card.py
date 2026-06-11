@@ -39,7 +39,9 @@ class DeviceCard(BasePanel):
         # Ряд кнопок (создаётся лениво при первом add_action).
         self._actions_row: QHBoxLayout | None = None
 
+    # ------------------------------------------------------------------
     # Декларативное наполнение
+    # ------------------------------------------------------------------
     def add_metric(self, key: str, label: str, value: str = "—") -> MetricRow:
         row = MetricRow(label, value)
         self._metrics[key] = row
@@ -64,8 +66,9 @@ class DeviceCard(BasePanel):
         btn.clicked.connect(callback)
         self._actions_row.addWidget(btn, 1)
 
-
+    # ------------------------------------------------------------------
     # Обновление состояния
+    # ------------------------------------------------------------------
     def set_metric(self, key: str, value, state: str | None = None) -> None:
         if key in self._metrics:
             self._metrics[key].set_value(value, state)

@@ -6,6 +6,11 @@ from .buttons import SmallButton, RedButton
 
 
 class StepRow(QWidget):
+    """Одна строка шага: подпись, кнопка «минус» и кнопка «плюс».
+
+    label_first=True  -> формат [подпись][−][+]  (как у суставов/лазера)
+    label_first=False -> формат [−val][+val]      (как у осей XYZ)
+    """
 
     def __init__(self, label: str, step: float,
                  on_step: Callable[[float], None],
@@ -33,7 +38,7 @@ class StepRow(QWidget):
 
 
 class StepControl(QWidget):
-
+    """Группа строк шага. Принимает список величин шага и общий колбэк."""
 
     def __init__(self, steps: Iterable[float],
                  on_step: Callable[[float], None],

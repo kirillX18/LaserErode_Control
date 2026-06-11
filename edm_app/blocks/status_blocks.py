@@ -1,6 +1,10 @@
+from datetime import datetime
+
 from PyQt5.QtWidgets import (
     QListWidget, QListWidgetItem, QPlainTextEdit, QPushButton,
+    QFileDialog, QMessageBox,
 )
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 
 from ..base import BasePanel
@@ -14,6 +18,8 @@ class AlarmPanel(BasePanel):
     def build(self) -> None:
         self.list = QListWidget()
         self.list.setMaximumHeight(150)
+        # Панель только для чтения — не должна попадать в обход фокуса по Tab.
+        self.list.setFocusPolicy(Qt.NoFocus)
         self.body.addWidget(self.list)
         self.set_alarms([])
 
@@ -45,9 +51,26 @@ class EventLogPanel(BasePanel):
         self.view.setMaximumBlockCount(400)
         self.body.addWidget(self.view)
 
-        self.clear_button = PrimaryButton("Очистить журнал")
-        self.clear_button.clicked.connect(self.view.clear)
-        self.body.addWidget(self.clear_button)
+        self.save_button = PrimaryButton("Сохранить журнал событий")
+        self.save_button.clicked.connect(self.save_log)
+        self.body.addWidget(self.save_button)
+
+    def save_log(self) -> None:
+        """Сохранить содержимое журнала событий в текстовый файл."""
+        default_name = "Журнал_событий_{:%Y-%m-%d_%H-%M-%S}.txt".format(
+            datetime.now())
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить журнал событий", default_name,
+            "Текстовые файлы (*.txt);;Все файлы (*)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(self.view.toPlainText())
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Ошибка сохранения",
+                "Не удалось сохранить журнал событий:\n{}".format(exc))
 
     def append(self, level: str, text: str) -> None:
         color = self.LEVEL_COLORS.get(level, theme.Palette.ACCENT)

@@ -1,19 +1,3 @@
-"""
-laser_tab.py — вкладка «Лазером» (настройка параметров лазерного воздействия).
-
-Интерфейс ручной настройки лазера для электроэрозионной обработки. Слева —
-пять одинаковых по устройству блоков-параметров (мощность, частота импульсов,
-фокусное смещение, длительность импульса, время воздействия), справа — выбор
-режима излучения. У устройства-заглушки лазерного узла нет, поэтому вкладка
-держит собственное локальное состояние, а результат действия показывает в
-строке внизу (LastMessageBar). Когда в стабах появится лазер, _apply_param и
-_mode_changed достаточно перенаправить в DeviceController.
-
-Каждый блок-параметр построен из уже существующих компонентов: MetricRow
-показывает текущее (применённое) значение, числовое поле QSpinBox задаёт
-нужное, а PrimaryButton «Задать» применяет его.
-"""
-
 from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QSpinBox,
     QButtonGroup, QRadioButton,
@@ -35,9 +19,11 @@ class _LaserParamPanel(BasePanel):
     через колбэк on_apply(name, value).
     """
 
-    def __init__(self, title: str, lo: int, hi: int, on_apply, parent=None):
+    def __init__(self, title: str, lo: int, hi: int, on_apply,
+                 unit: str = "", parent=None):
         self._title_text = title
         self._lo, self._hi = lo, hi
+        self._unit = unit
         self._value = 0
         self._on_apply = on_apply
         super().__init__(title, parent)
@@ -45,7 +31,7 @@ class _LaserParamPanel(BasePanel):
     def build(self) -> None:
         # Текущее значение — строкой «подпись … значение», как на остальных
         # вкладках (ср. «Текущая позиция:», «Текущая скорость:»).
-        self.value_row = MetricRow("Текущее значение:", "0")
+        self.value_row = MetricRow("Текущее значение:", self._fmt(0))
         self.body.addWidget(self.value_row)
 
         # Строка ввода: подпись — поле со счётчиком — «Задать»
@@ -55,6 +41,8 @@ class _LaserParamPanel(BasePanel):
         self.spin = QSpinBox()
         self.spin.setRange(self._lo, self._hi)
         self.spin.setValue(0)
+        if self._unit:
+            self.spin.setSuffix(f" {self._unit}")
         grid.addWidget(self.spin, 0, 1)
         self.apply_btn = PrimaryButton("Задать")
         self.apply_btn.setMaximumWidth(120)
@@ -69,15 +57,19 @@ class _LaserParamPanel(BasePanel):
         self.body.addWidget(self.steps)
 
     # ------------------------------------------------------------------
+    def _fmt(self, value) -> str:
+        """Значение с единицей измерения (если она задана)."""
+        return f"{value} {self._unit}".rstrip() if self._unit else str(value)
+
     def _step(self, delta: float) -> None:
         # setValue сам ограничит значение диапазоном поля.
         self.spin.setValue(int(self.spin.value() + delta))
 
     def _apply(self) -> None:
         self._value = self.spin.value()
-        self.value_row.set_value(self._value)
+        self.value_row.set_value(self._fmt(self._value))
         if self._on_apply is not None:
-            self._on_apply(self._title_text, self._value)
+            self._on_apply(self._title_text, self._value, self._unit)
 
     def value(self) -> int:
         return self._value
@@ -127,14 +119,14 @@ class _ModePanel(BasePanel):
 class LaserControlTab(BaseServiceTab):
     """Вкладка «Лазером»: параметры воздействия слева, режим излучения справа."""
 
-    # (название блока, нижняя граница, верхняя граница).
+    # (название блока, нижняя граница, верхняя граница, единица измерения).
     # Фокусное смещение регулируется «в обе стороны», поэтому может быть < 0.
     PARAM_SPECS = [
-        ("Мощность лазера",        0,       100000),
-        ("Частота импульсов",      0,       100000),
-        ("Фокусное смещение",     -100000,  100000),
-        ("Длительность импульса",  0,       100000),
-        ("Время воздействия",      0,       100000),
+        ("Мощность лазера",        0,       100000,  "Вт"),
+        ("Частота импульсов",      0,       100000,  "Гц"),
+        ("Фокусное смещение",     -100000,  100000,  "мкм"),
+        ("Длительность импульса",  0,       100000,  "мкс"),
+        ("Время воздействия",      0,       100000,  "мс"),
     ]
 
     def build_content(self, layout: QVBoxLayout) -> None:
@@ -144,8 +136,9 @@ class LaserControlTab(BaseServiceTab):
         grid = QGridLayout()
         self.params: dict[str, _LaserParamPanel] = {}
         positions = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]
-        for (name, lo, hi), (r, c) in zip(self.PARAM_SPECS, positions):
-            panel = _LaserParamPanel(name, lo, hi, on_apply=self._apply_param)
+        for (name, lo, hi, unit), (r, c) in zip(self.PARAM_SPECS, positions):
+            panel = _LaserParamPanel(name, lo, hi,
+                                     on_apply=self._apply_param, unit=unit)
             self.params[name] = panel
             grid.addWidget(panel, r, c)
         grid.setColumnStretch(0, 1)
@@ -167,8 +160,9 @@ class LaserControlTab(BaseServiceTab):
         layout.addWidget(self.status_line)
 
     # ------------------------------------------------------------------
-    def _apply_param(self, name: str, value: int) -> None:
-        self.status_line.set_message("info", f"{name}: задано значение {value}")
+    def _apply_param(self, name: str, value: int, unit: str = "") -> None:
+        shown = f"{value} {unit}".rstrip() if unit else str(value)
+        self.status_line.set_message("info", f"{name}: задано значение {shown}")
 
     def _mode_changed(self, mode_text: str) -> None:
         self.status_line.set_message("info", f"Режим работы: {mode_text.lower()}")

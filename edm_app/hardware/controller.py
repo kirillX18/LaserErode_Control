@@ -1,22 +1,11 @@
-"""
-controller.py — адаптер между классами-заглушками и UI.
-
-Это единственное место, где UI «знает» о железе. Страницы и виджеты не
-обращаются к стабам напрямую — они вызывают методы DeviceController и читают
-плоский снимок состояния snapshot(). Так UI остаётся независимым от внутренней
-структуры стабов: при замене заглушек на реальную прошивку меняется только
-этот файл.
-
-Связь идёт через сигналы Qt:
-    logMessage(level, text) — сообщения логгера «hardware» (для окна журнала);
-    stateChanged()         — что-то изменилось, UI должен перерисоваться.
-"""
-
 from __future__ import annotations
 
 import logging
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import (
+    QObject, QThread, QMetaObject, pyqtSignal, pyqtSlot, Qt,
+)
+from PyQt5.QtWidgets import QApplication
 
 from .laser_erosion_stubs import (
     HardwareRegistry, ProcessController, TestHarness, TransistorChannel,
@@ -24,7 +13,12 @@ from .laser_erosion_stubs import (
 
 
 class _SignalLogHandler(logging.Handler):
-    """Перенаправляет записи логгера «hardware» в сигнал Qt."""
+    """Перенаправляет записи логгера «hardware» в сигнал Qt.
+
+    Обработчик срабатывает в том потоке, где идёт логирование (то есть в потоке
+    воркера). Это безопасно: emit сигнала можно вызывать из любого потока —
+    Qt доставит его получателям (виджетам в UI-потоке) через очередь.
+    """
 
     def __init__(self, controller: "DeviceController"):
         super().__init__()
@@ -35,97 +29,129 @@ class _SignalLogHandler(logging.Handler):
                                          record.getMessage())
 
 
-class DeviceController(QObject):
-    """Фасад над HardwareRegistry + ProcessController + TestHarness."""
+def _compute_alarms(s: dict) -> list:
+    """Активные аварии/предупреждения по снимку: список (severity, text, source).
 
-    logMessage = pyqtSignal(str, str)   # (level, text)
-    stateChanged = pyqtSignal()
+    Чистая функция от снимка — считается в UI-потоке по уже полученной копии,
+    к железу не обращается.
+    """
+    out = []
+    if not s["lid"]["closed"]:
+        out.append(("err", "Крышка открыта", "lid_sensor.is_open()"))
+    if s["temp"]["over"]:
+        out.append(("err", f"Перегрев: {s['temp']['t']:.1f} °C > {s['temp']['max']:.0f} °C",
+                    "temperature_sensor.is_overheated()"))
+    if s["psu"]["tripped"]:
+        out.append(("err", "Перегрузка по току источника 48 В",
+                    "power_supply_48v.overcurrent_tripped"))
+    if s["process_running"] and not s["psu"]["on"]:
+        out.append(("err", "Источник 48 В отключился во время процесса",
+                    "power_supply_48v.is_on()"))
+    if not s["acdc"]["on"]:
+        out.append(("warn", "Нет питания AC/DC — запуск невозможен",
+                    "ac_dc_converter.is_on()"))
+    if s["acdc"]["on"] and not s["tank"]["ready"] and not s["process_running"]:
+        out.append(("warn", "Ёмкость для полировки не готова",
+                    "polishing_tank.is_ready()"))
+    psu = s["psu"]
+    if psu["on"] and psu["limit"] * 0.9 <= psu["i"] <= psu["limit"]:
+        out.append(("warn", f"Ток близок к лимиту: {psu['i']:.1f} / {psu['limit']:.1f} А",
+                    "power_supply_48v.get_current()"))
+    return out
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+
+# ======================================================================
+# Воркер: живёт в отдельном потоке, единственный, кто трогает железо.
+# ======================================================================
+class _HardwareWorker(QObject):
+    """Владеет стабами и выполняет все обращения к железу в своём потоке.
+
+    Наружу отдаёт только сигналы. Команды принимает слотом run(name, args):
+    каждый вызов попадает в очередь событий потока и выполняется по очереди,
+    поэтому команды не накладываются друг на друга, а долгая операция (реальное
+    железо) не вешает UI — она просто блокирует ЭТОТ поток.
+    """
+
+    snapshotReady = pyqtSignal(dict)        # готовый снимок состояния (копия)
+    commandDone = pyqtSignal(str, bool)     # (имя команды, успех)
+
+    def __init__(self):
+        super().__init__()                  # без parent — обязательно для moveToThread
         self.hw = HardwareRegistry()
         self.process = ProcessController(self.hw)
         self.test = TestHarness(self.hw, self.process)
 
-        # Асинхронное (фоновое) движение ШД: позиция меняется в фоне, поток UI
-        # не блокируется, а индикатор «движется» виден до завершения хода.
-        # scale подобран так, чтобы ход был заметен, но не раздражал
-        # (≈ steps/speed * scale секунд; полный ход 1000/100*0.4 ≈ 4 c).
+        # Фоновое движение ШД остаётся включённым: стаб сам имитирует ход в своём
+        # потоке, индикатор «движется» виден до завершения. Поток воркера при
+        # этом свободен. (Для реального железа, если ход блокирующий, его можно
+        # выполнять прямо здесь — UI всё равно не пострадает.)
         self.hw.stepper_motor.set_async_motion(True, scale=0.4)
 
-        # Подписываемся на логгер «hardware», как и предполагали стабы.
-        self._handler = _SignalLogHandler(self)
-        self._handler.setLevel(logging.INFO)
-        log = logging.getLogger("hardware")
-        log.setLevel(logging.INFO)
-        log.addHandler(self._handler)
-        log.propagate = False
+        # Карта команд: имя -> вызываемое. Совпадает с прежними целями _do().
+        self._dispatch = {
+            "initialize": self.process.initialize,
+            "start_process": self.process.start_process,
+            "stop_process": self.process.stop_process,
+            "emergency_stop": self.process.emergency_stop,
+            "set_current_limit": self.hw.power_supply_48v.set_current_limit,
+            "set_speed": self.process.set_motor_speed,
+            "move_to": self.process.move_motor_to,
+            "set_max_temp": self.hw.temperature_sensor.set_max_temperature,
+            "set_load_power": self.hw.transistors.set_load_power,
+            "reset_motor": self.hw.stepper_motor.reset_position,
+            "stop_motor": self.hw.stepper_motor.stop,
+            "set_channel": self._set_channel,
+            "acdc_on": self.hw.ac_dc_converter.turn_on,
+            "acdc_off": self.hw.ac_dc_converter.turn_off,
+            "fill_tank": self.hw.polishing_tank.fill,
+            "drain_tank": self.hw.polishing_tank.drain,
+            "connect_electrodes": self.hw.polishing_tank.connect_electrodes,
+            "disconnect_electrodes": self.hw.polishing_tank.disconnect_electrodes,
+            "set_lid": self.test.set_lid,
+            "set_temperature": self.test.set_temperature,
+            "simulate_current": self._simulate_current,
+        }
 
-    # ------------------------------------------------------------------
-    # Команды процесса
-    # ------------------------------------------------------------------
-    def initialize(self):      return self._do(self.process.initialize)
-    def start_process(self):   return self._do(self.process.start_process)
-    def stop_process(self):    return self._do(self.process.stop_process)
-    def emergency_stop(self):  return self._do(self.process.emergency_stop)
-
-    # ------------------------------------------------------------------
-    # Параметры
-    # ------------------------------------------------------------------
-    def set_current_limit(self, v): return self._do(self.hw.power_supply_48v.set_current_limit, v)
-    def set_speed(self, v):         return self._do(self.process.set_motor_speed, v)
-    def move_to(self, v):           return self._do(self.process.move_motor_to, v)
-    def set_max_temp(self, v):      return self._do(self.hw.temperature_sensor.set_max_temperature, v)
-    def set_load_power(self, on):   return self._do(self.hw.transistors.set_load_power, on)
-    def reset_motor(self):          return self._do(self.hw.stepper_motor.reset_position)
-    def stop_motor(self):           return self._do(self.hw.stepper_motor.stop)
-
-    def set_channel(self, channel: TransistorChannel, on: bool):
+    # --- обёртки для команд со своей логикой ---------------------------
+    def _set_channel(self, channel: TransistorChannel, on: bool):
         fn = self.hw.transistors.turn_on if on else self.hw.transistors.turn_off
-        return self._do(fn, channel)
+        return fn(channel)
 
-    def acdc_on(self):  return self._do(self.hw.ac_dc_converter.turn_on)
-    def acdc_off(self): return self._do(self.hw.ac_dc_converter.turn_off)
-
-    # ------------------------------------------------------------------
-    # Подготовка ёмкости — реальные операции устройства (не стенд)
-    # ------------------------------------------------------------------
-    def fill_tank(self):             return self._do(self.hw.polishing_tank.fill)
-    def drain_tank(self):            return self._do(self.hw.polishing_tank.drain)
-    def connect_electrodes(self):    return self._do(self.hw.polishing_tank.connect_electrodes)
-    def disconnect_electrodes(self): return self._do(self.hw.polishing_tank.disconnect_electrodes)
-
-    # ------------------------------------------------------------------
-    # Имитация сигналов датчиков (TestHarness — только стенд)
-    # ------------------------------------------------------------------
-    def set_lid(self, closed):       return self._do(self.test.set_lid, closed)
-    def set_temperature(self, v):    return self._do(self.test.set_temperature, v)
-
-    def simulate_current(self, v):
+    def _simulate_current(self, v):
         result = self.test.simulate_current(v)
         self.process.check_safety()  # стаб не делает это сам для тока
-        self.stateChanged.emit()
         return result
 
-    # ------------------------------------------------------------------
-    # Мониторинг (вызывать периодически из QTimer)
-    # ------------------------------------------------------------------
+    # --- слоты, вызываемые из UI через queued-connection ----------------
+    @pyqtSlot(str, object)
+    def run(self, name: str, args: tuple) -> None:
+        """Выполнить команду. Может блокировать — это поток воркера, не UI."""
+        fn = self._dispatch.get(name)
+        ok = False
+        if fn is not None:
+            try:
+                ok = bool(fn(*args))
+            except Exception:                      # noqa: BLE001 — не роняем поток
+                logging.getLogger("hardware").exception(
+                    "Ошибка выполнения команды %s", name)
+                ok = False
+        self.snapshotReady.emit(self._snapshot())
+        self.commandDone.emit(name, ok)
+
+    @pyqtSlot()
     def poll(self) -> None:
+        """Периодический мониторинг безопасности + рассылка снимка."""
         self.process.check_safety()
-        self.stateChanged.emit()
+        self.snapshotReady.emit(self._snapshot())
 
-    def system_status(self) -> str:
-        return self.process.get_system_status()
-
-    # ------------------------------------------------------------------
-    # Снимок состояния для UI (плоский dict — UI не лезет внутрь стабов)
-    # ------------------------------------------------------------------
-    def snapshot(self) -> dict:
+    # --- снимок состояния (плоский dict — UI не лезет внутрь стабов) -----
+    def _snapshot(self) -> dict:
         hw, p = self.hw, self.process
         ch = hw.transistors.channels
         return {
             "initialized": p.initialized,
             "process_running": p.process_running,
+            "system_status": p.get_system_status(),
             "acdc": {
                 "on": hw.ac_dc_converter.is_on(),
                 "vin": hw.ac_dc_converter.get_input_voltage(),
@@ -157,6 +183,7 @@ class DeviceController(QObject):
                 "enabled": hw.stepper_driver.enabled,
                 "moving": hw.stepper_driver.moving,
                 "speed": hw.stepper_driver.speed,
+                "connected": hw.stepper_motor.driver is hw.stepper_driver,
             },
             "motor": {
                 "pos": hw.stepper_motor.get_position(),
@@ -179,40 +206,160 @@ class DeviceController(QObject):
             },
         }
 
-    def alarms(self) -> list:
-        """Активные аварии/предупреждения: список (severity, text, source)."""
-        s = self.snapshot()
-        out = []
-        if not s["lid"]["closed"]:
-            out.append(("err", "Крышка открыта", "lid_sensor.is_open()"))
-        if s["temp"]["over"]:
-            out.append(("err", f"Перегрев: {s['temp']['t']:.1f} °C > {s['temp']['max']:.0f} °C",
-                        "temperature_sensor.is_overheated()"))
-        if s["psu"]["tripped"]:
-            out.append(("err", "Перегрузка по току источника 48 В",
-                        "power_supply_48v.overcurrent_tripped"))
-        if s["process_running"] and not s["psu"]["on"]:
-            out.append(("err", "Источник 48 В отключился во время процесса",
-                        "power_supply_48v.is_on()"))
-        if not s["acdc"]["on"]:
-            out.append(("warn", "Нет питания AC/DC — запуск невозможен",
-                        "ac_dc_converter.is_on()"))
-        if s["acdc"]["on"] and not s["tank"]["ready"] and not s["process_running"]:
-            out.append(("warn", "Ёмкость для полировки не готова",
-                        "polishing_tank.is_ready()"))
-        psu = s["psu"]
-        if psu["on"] and psu["limit"] * 0.9 <= psu["i"] <= psu["limit"]:
-            out.append(("warn", f"Ток близок к лимиту: {psu['i']:.1f} / {psu['limit']:.1f} А",
-                        "power_supply_48v.get_current()"))
-        return out
+
+# ======================================================================
+# Фасад: живёт в UI-потоке, наружу — прежний интерфейс DeviceController.
+# ======================================================================
+class DeviceController(QObject):
+    """Фасад над воркером. Команды ставит в очередь, состояние отдаёт из кэша."""
+
+    logMessage = pyqtSignal(str, str)        # (level, text)
+    stateChanged = pyqtSignal()              # без аргументов — как раньше
+    busyChanged = pyqtSignal(bool)           # идёт ли выполнение команды
+    commandFinished = pyqtSignal(str, bool)  # (имя, успех)
+
+    # Внутренний сигнал-«почтальон» к воркеру (queued, т.к. разные потоки).
+    _command = pyqtSignal(str, object)
+
+    def __init__(self, parent=None, busy_cursor: bool = True):
+        super().__init__(parent)
+
+        self._worker = _HardwareWorker()
+        # Снимок, доступный сразу (страницы читают snapshot() уже в __init__,
+        # до старта потока). Считаем синхронно — конкурентного доступа ещё нет.
+        self._snap: dict = self._worker._snapshot()
+        self._pending = 0                    # сколько команд «в полёте»
+
+        # Подписываемся на логгер «hardware» (как и раньше).
+        self._handler = _SignalLogHandler(self)
+        self._handler.setLevel(logging.INFO)
+        log = logging.getLogger("hardware")
+        log.setLevel(logging.INFO)
+        log.addHandler(self._handler)
+        log.propagate = False
+
+        # Переносим воркер в свой поток и связываем сигналы.
+        self._thread = QThread()
+        self._worker.moveToThread(self._thread)
+        self._worker.snapshotReady.connect(self._on_snapshot)    # queued -> UI
+        self._worker.commandDone.connect(self._on_command_done)  # queued -> UI
+        self._command.connect(self._worker.run)                  # queued -> воркер
+        self._thread.start()
+
+        # Видимая занятость без правок страниц: курсор ожидания на время команды.
+        if busy_cursor:
+            self.busyChanged.connect(self._toggle_wait_cursor)
+
+        # Чистое завершение потока при выходе из приложения (без правок window.py).
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.shutdown)
 
     # ------------------------------------------------------------------
-    # служебное
+    # Постановка команд в очередь воркера (fire-and-forget; результат —
+    # сигналом commandFinished). Возвращаемое значение нигде не использовалось.
     # ------------------------------------------------------------------
-    def _do(self, fn, *args):
-        result = fn(*args)
+    def _request(self, name: str, *args) -> None:
+        self._pending += 1
+        if self._pending == 1:
+            self.busyChanged.emit(True)
+        self._command.emit(name, args)
+
+    # ------------------------------------------------------------------
+    # Команды процесса
+    # ------------------------------------------------------------------
+    def initialize(self):      self._request("initialize")
+    def start_process(self):   self._request("start_process")
+    def stop_process(self):    self._request("stop_process")
+    def emergency_stop(self):  self._request("emergency_stop")
+
+    # ------------------------------------------------------------------
+    # Параметры
+    # ------------------------------------------------------------------
+    def set_current_limit(self, v): self._request("set_current_limit", v)
+    def set_speed(self, v):         self._request("set_speed", v)
+    def move_to(self, v):           self._request("move_to", v)
+    def set_max_temp(self, v):      self._request("set_max_temp", v)
+    def set_load_power(self, on):   self._request("set_load_power", on)
+    def reset_motor(self):          self._request("reset_motor")
+    def stop_motor(self):           self._request("stop_motor")
+
+    def set_channel(self, channel: TransistorChannel, on: bool):
+        self._request("set_channel", channel, on)
+
+    def acdc_on(self):  self._request("acdc_on")
+    def acdc_off(self): self._request("acdc_off")
+
+    # ------------------------------------------------------------------
+    # Подготовка ёмкости — реальные операции устройства (не стенд)
+    # ------------------------------------------------------------------
+    def fill_tank(self):             self._request("fill_tank")
+    def drain_tank(self):            self._request("drain_tank")
+    def connect_electrodes(self):    self._request("connect_electrodes")
+    def disconnect_electrodes(self): self._request("disconnect_electrodes")
+
+    # ------------------------------------------------------------------
+    # Имитация сигналов датчиков (TestHarness — только стенд)
+    # ------------------------------------------------------------------
+    def set_lid(self, closed):       self._request("set_lid", closed)
+    def set_temperature(self, v):    self._request("set_temperature", v)
+    def simulate_current(self, v):   self._request("simulate_current", v)
+
+    # ------------------------------------------------------------------
+    # Мониторинг (вызывается периодически из QTimer в window.py)
+    # ------------------------------------------------------------------
+    def poll(self) -> None:
+        """«Метроном»: ставим в очередь воркеру опрос безопасности.
+
+        Сама проверка и сбор снимка идут в потоке воркера; UI не блокируется.
+        """
+        QMetaObject.invokeMethod(self._worker, "poll", Qt.QueuedConnection)
+
+    def system_status(self) -> str:
+        return self._snap.get("system_status", "")
+
+    # ------------------------------------------------------------------
+    # Состояние для UI — из кэша (копия, без обращений к железу)
+    # ------------------------------------------------------------------
+    def snapshot(self) -> dict:
+        return self._snap
+
+    def alarms(self) -> list:
+        return _compute_alarms(self._snap)
+
+    def is_busy(self) -> bool:
+        return self._pending > 0
+
+    # ------------------------------------------------------------------
+    # Завершение
+    # ------------------------------------------------------------------
+    def shutdown(self) -> None:
+        if self._thread.isRunning():
+            self._thread.quit()
+            self._thread.wait(2000)
+
+    # ------------------------------------------------------------------
+    # Слоты UI-потока (приём сигналов воркера)
+    # ------------------------------------------------------------------
+    @pyqtSlot(dict)
+    def _on_snapshot(self, snap: dict) -> None:
+        self._snap = snap
         self.stateChanged.emit()
-        return result
+
+    @pyqtSlot(str, bool)
+    def _on_command_done(self, name: str, ok: bool) -> None:
+        if self._pending > 0:
+            self._pending -= 1
+        if self._pending == 0:
+            self.busyChanged.emit(False)
+        self.commandFinished.emit(name, ok)
+
+    @pyqtSlot(bool)
+    def _toggle_wait_cursor(self, busy: bool) -> None:
+        if busy:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        else:
+            QApplication.restoreOverrideCursor()
 
 
 # Единый общий контроллер на всё приложение (шапка и страница «Оборудование»

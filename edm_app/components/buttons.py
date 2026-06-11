@@ -1,4 +1,4 @@
-from PyQt5.QtCore import QEvent, QPointF, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import QEvent, QPointF, QPropertyAnimation, QEasingCurve, Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QPushButton, QGraphicsDropShadowEffect
 
@@ -24,6 +24,10 @@ class _RoleButton(QPushButton):
         if self.max_width is not None:
             self.setMaximumWidth(self.max_width)
 
+        # Кнопка должна получать фокус с клавиатуры (Tab) и активироваться
+        # Enter/Space — иначе управление без мыши невозможно.
+        self.setFocusPolicy(Qt.StrongFocus)
+
         # Мягкая тень под кнопкой — её параметры и анимируются.
         self._shadow = QGraphicsDropShadowEffect(self)
         self._shadow.setColor(QColor(0, 0, 0, 90))
@@ -36,8 +40,9 @@ class _RoleButton(QPushButton):
         self._offset_anim = QPropertyAnimation(self._shadow, b"offset", self)
         self._offset_anim.setEasingCurve(QEasingCurve.OutCubic)
 
-
+    # ------------------------------------------------------------------
     # Анимация
+    # ------------------------------------------------------------------
     def _elevate(self, target: tuple[float, float], duration: int) -> None:
         """Плавно перевести тень к (blur, offset_y)."""
         blur, dy = target
@@ -50,7 +55,9 @@ class _RoleButton(QPushButton):
             anim.setEndValue(end)
             anim.start()
 
+    # ------------------------------------------------------------------
     # События мыши и состояния
+    # ------------------------------------------------------------------
     def enterEvent(self, event):
         if self.isEnabled():
             self._elevate(self._HOVER, self._DURATION_HOVER)

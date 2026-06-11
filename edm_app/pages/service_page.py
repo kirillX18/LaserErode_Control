@@ -1,6 +1,7 @@
 from PyQt5.QtWidgets import QVBoxLayout, QTabWidget
 
 from ..base import BasePage
+from ..components import AnimatedTabBar
 from ..tabs import SERVICE_TABS
 
 
@@ -9,6 +10,7 @@ class ServiceControlTabs(QTabWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setTabBar(AnimatedTabBar())   # плавная подсветка при наведении
         self.tabs = {}
         for title, tab_cls in SERVICE_TABS:
             tab = tab_cls()

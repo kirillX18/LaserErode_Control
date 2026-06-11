@@ -16,7 +16,8 @@ class BasePanel(QGroupBox):
         self.body = QVBoxLayout(self)
         self.build()
 
-    def build(self) -> None:  
+    def build(self) -> None:  # переопределяется наследниками
+        """Наполнение панели. По умолчанию пусто."""
         raise NotImplementedError
 
 

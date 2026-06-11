@@ -20,6 +20,11 @@ class Palette:
     TITLE_BLUE = "#1f4e79"
     TAB_BG = "#e4e4e4"
 
+    # Индикатор фокуса (управление с клавиатуры). Амбер хорошо виден на
+    # зелёных/красных/серых кнопках; синий — на белых полях ввода.
+    FOCUS = "#ffc107"
+    FOCUS_FIELD = "#1f4e79"
+
     # --- статусы узлов (страница «Оборудование», HMI-перенос) ---
     OK = GREEN            # включено / работа
     OK_BG = "#e3f4e3"
@@ -62,14 +67,15 @@ QGroupBox::title {{
 QPushButton {{
     background: {Palette.GREEN};
     color: white;
-    border: none;
+    border: 2px solid transparent;
     border-radius: 3px;
-    padding: 8px 10px;
+    padding: 6px 8px;
     font-weight: bold;
 }}
 QPushButton:hover    {{ background: {Palette.GREEN_HOVER}; }}
 QPushButton:pressed  {{ background: {Palette.GREEN_PRESSED}; }}
 QPushButton:disabled {{ background: #cfcfcf; color: #888888; }}
+QPushButton[keyFocus="true"] {{ border: 2px solid {Palette.FOCUS}; }}
 
 QPushButton#{ROLE_DANGER}            {{ background: {Palette.RED}; }}
 QPushButton#{ROLE_DANGER}:hover      {{ background: {Palette.RED_HOVER}; }}
@@ -99,6 +105,15 @@ QLineEdit, QDoubleSpinBox, QSpinBox, QTextEdit, QPlainTextEdit, QListWidget {{
     border-radius: 3px;
     padding: 4px;
 }}
+QLineEdit[keyFocus="true"], QDoubleSpinBox[keyFocus="true"],
+QSpinBox[keyFocus="true"], QTextEdit[keyFocus="true"],
+QPlainTextEdit[keyFocus="true"], QListWidget[keyFocus="true"] {{
+    border: 2px solid {Palette.FOCUS_FIELD};
+}}
+QCheckBox[keyFocus="true"], QRadioButton[keyFocus="true"] {{
+    border: 1px solid {Palette.FOCUS_FIELD};
+    border-radius: 3px;
+}}
 
 QTabBar::tab {{
     background: {Palette.TAB_BG};
@@ -107,6 +122,7 @@ QTabBar::tab {{
     margin-right: 1px;
 }}
 QTabBar::tab:selected {{ background: {Palette.PANEL}; }}
+QTabBar:focus {{ outline: none; }}
 """
 
 

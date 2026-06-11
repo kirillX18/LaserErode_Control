@@ -1,3 +1,5 @@
+"""Крупные переиспользуемые панели-блоки, собранные из компонентов."""
+
 from .device_card import DeviceCard
 from .status_blocks import AlarmPanel, EventLogPanel, DiagnosticsPanel
 from .control_blocks import QuickActionBar, ParameterForm, TestHarnessPanel

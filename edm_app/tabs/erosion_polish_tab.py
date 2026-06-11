@@ -3,18 +3,21 @@ from PyQt5.QtWidgets import (
 )
 
 from ..base import BaseServiceTab, BasePanel
-from ..components import PrimaryButton, GrayButton, MetricRow, LastMessageBar
+from ..components import PrimaryButton, MetricRow, LastMessageBar
 from ..hardware import controller
 
 
 class _TankPanel(BasePanel):
     def build(self) -> None:
         row = QHBoxLayout()
+        # Все четыре кнопки — зелёные. Доступность переключается в _refresh()
+        # по состоянию ёмкости: активное действие остаётся зелёным и кликабельным,
+        # обратное автоматически становится серым и некликабельным (QSS :disabled).
         self.fill = PrimaryButton("Наполнить")
-        self.drain = GrayButton("Слить")
+        self.drain = PrimaryButton("Слить")
         self.drain.setMaximumWidth(200)
         self.connect = PrimaryButton("Подключить электроды")
-        self.disconnect = GrayButton("Отключить электроды")
+        self.disconnect = PrimaryButton("Отключить электроды")
         self.disconnect.setMaximumWidth(200)
         for b in (self.fill, self.drain, self.connect, self.disconnect):
             row.addWidget(b)
@@ -115,6 +118,15 @@ class ErosionPolishTab(BaseServiceTab):
         self.tank.m_ready.set_value("готова" if k["ready"] else "не готова",
                                     "ok" if k["ready"] else "warn")
         self.tank.m_volt.set_value(f"{k['volt']:.1f} В", "ok")
+
+        # Доступность кнопок по текущему состоянию ёмкости. Доступная (зелёная)
+        # кнопка — это действие, которое сейчас имеет смысл; обратное действие
+        # отключается и за счёт стиля :disabled выглядит серым и не кликается.
+        electrodes = k["anode"] and k["cathode"]
+        self.tank.fill.setEnabled(not k["filled"])
+        self.tank.drain.setEnabled(k["filled"])
+        self.tank.connect.setEnabled(not electrodes)
+        self.tank.disconnect.setEnabled(electrodes)
 
         self.source.m_v.set_value(f"{p['v']:.0f} В", on(p["on"]))
         over = p["on"] and p["i"] > p["limit"]

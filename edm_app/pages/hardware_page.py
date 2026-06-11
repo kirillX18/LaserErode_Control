@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (
 from ..base import BasePage
 from ..components import SectionTitle
 from ..blocks import (
-    DeviceCard, AlarmPanel, EventLogPanel, DiagnosticsPanel,
+    DeviceCard, AlarmPanel, EventLogPanel,
     QuickActionBar, TestHarnessPanel,
 )
 from ..hardware import controller, TransistorChannel
@@ -110,7 +110,7 @@ class HardwarePage(BasePage):
         c = DeviceCard("Датчик температуры")
         c.add_metric("t", "Температура")
         c.add_metric("max", "Порог перегрева")
-        c.add_bar("t", "warn")
+        c.add_bar("t", "ok")
         self.cards["temp"] = c
 
         # Размещение: 2 колонки; «транзисторы» — на всю ширину.
@@ -138,12 +138,10 @@ class HardwarePage(BasePage):
         v = QVBoxLayout(inner)
 
         self.alarms = AlarmPanel("Ошибки и предупреждения")
-        self.diag = DiagnosticsPanel("Диагностика")
         self.log = EventLogPanel("Журнал событий (logger «hardware»)")
         self.harness = TestHarnessPanel()
 
         v.addWidget(self.alarms)
-        v.addWidget(self.diag)
         v.addWidget(self.log, 1)
         v.addWidget(self.harness)
 
@@ -160,8 +158,6 @@ class HardwarePage(BasePage):
         self.quick.start_button.clicked.connect(self.ctl.start_process)
         self.quick.stop_button.clicked.connect(self.ctl.stop_process)
         self.quick.estop_button.clicked.connect(self.ctl.emergency_stop)
-        self.diag.refresh_button.clicked.connect(
-            lambda: self.diag.set_status(self.ctl.system_status()))
 
         h = self.harness
         h.lid_check.toggled.connect(self.ctl.set_lid)
@@ -224,11 +220,12 @@ class HardwarePage(BasePage):
 
         # Драйвер ШД
         d = s["driver"]; card = self.cards["driver"]
-        if d["enabled"]:
-            card.set_state("Движение" if d["moving"] else "Вкл",
-                           "ok" if d["moving"] else "warn")
-        else:
+        if not d["enabled"]:
             card.set_state("Выкл", "off")
+        elif not d.get("connected", True):
+            card.set_state("Нет связи с ШД", "warn")
+        else:
+            card.set_state("Движение" if d["moving"] else "Вкл", "ok")
         card.set_metric("state", "включен" if d["enabled"] else "выключен", on(d["enabled"]))
         card.set_metric("speed", f"{d['speed']} шаг/с", "ok")
 
@@ -245,7 +242,7 @@ class HardwarePage(BasePage):
         # Ёмкость
         k = s["tank"]; card = self.cards["tank"]
         card.set_state("Процесс" if k["running"] else ("Готова" if k["ready"] else "Не готова"),
-                       "ok" if k["running"] else ("warn" if k["ready"] else "off"))
+                       "ok" if k["running"] else ("off" if k["ready"] else "warn"))
         card.set_metric("filled", "есть" if k["filled"] else "нет", on(k["filled"]))
         elec = f"{'+' if k['anode'] else '−'} / {'+' if k['cathode'] else '−'}"
         card.set_metric("elec", elec, on(k["anode"] and k["cathode"]))
@@ -259,13 +256,17 @@ class HardwarePage(BasePage):
 
         # Температура
         tp = s["temp"]; card = self.cards["temp"]
-        card.set_state("Перегрев" if tp["over"] else "Норма", "err" if tp["over"] else "ok")
-        card.set_metric("t", f"{tp['t']:.1f} °C", "err" if tp["over"] else "ok")
+        near = bool(tp["max"]) and not tp["over"] and tp["t"] >= tp["max"] - 5
+        if tp["over"]:
+            t_role, t_state = "err", "Перегрев"
+        elif near:
+            t_role, t_state = "warn", "Близко к перегреву"
+        else:
+            t_role, t_state = "ok", "Норма"
+        card.set_state(t_state, t_role)
+        card.set_metric("t", f"{tp['t']:.1f} °C", t_role)
         card.set_metric("max", f"{tp['max']:.0f} °C")
-        card.set_bar("t", tp["t"] / tp["max"] if tp["max"] else 0,
-                     "err" if tp["over"] else "warn")
+        card.set_bar("t", tp["t"] / tp["max"] if tp["max"] else 0, t_role)
 
-        # аварии + диагностика (если уже открывалась)
+        # аварии
         self.alarms.set_alarms(self.ctl.alarms())
-        if not self.diag.view.toPlainText().startswith("Нажмите"):
-            self.diag.set_status(self.ctl.system_status())
