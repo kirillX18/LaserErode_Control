@@ -1,3 +1,18 @@
+"""
+base.py — базовые классы интерфейса.
+
+Иерархия (по мотивам примера, адаптирована под текущий дизайн с верхними
+вкладками):
+
+    QWidget
+      ├── BasePanel        — базовый блок-панель (QGroupBox с именем)
+      ├── BasePage         — страница верхнего уровня (с заголовком-секцией)
+      └── BaseServiceTab   — базовая вкладка сервисного управления
+
+Каждый класс задаёт «скелет» (setup_ui -> build_content) и оставляет
+наследникам только наполнение через переопределение build_content().
+"""
+
 from PyQt5.QtWidgets import QWidget, QGroupBox, QVBoxLayout
 
 from .components import SectionTitle

@@ -1,6 +1,40 @@
+"""
+controller.py — адаптер между классами-заглушками и UI.
+
+Это единственное место, где UI «знает» о железе. Страницы и виджеты не
+обращаются к стабам напрямую — они вызывают методы DeviceController и читают
+плоский снимок состояния snapshot(). Так UI остаётся независимым от внутренней
+структуры стабов: при замене заглушек на реальную прошивку меняется только
+этот файл.
+
+АСИНХРОННОСТЬ (правильная схема Qt):
+    Всё, что трогает железо, живёт в отдельном потоке (_HardwareWorker в своём
+    QThread). Поток UI НИКОГДА не ждёт железо, а поток железа НИКОГДА не трогает
+    виджеты — общение идёт только сигналами Qt (queued-connection):
+
+      • команды (initialize, move_to, …) уходят в воркер сигналом и ставятся
+        в очередь — выполняются по одной, не мешая друг другу и не вешая UI;
+      • воркер собирает снимок состояния у себя и присылает готовый dict
+        (snapshotReady) — UI получает копию и только перерисовывается, общей
+        изменяемой памяти между потоками нет;
+      • busyChanged/commandFinished позволяют UI блокировать кнопки и показывать
+        занятость на время выполнения команды.
+
+    Публичный интерфейс DeviceController не изменился: страницы и виджеты
+    работают как раньше (snapshot(), alarms(), stateChanged, logMessage,
+    команды-методы). Поэтому остальные файлы менять не нужно.
+
+Связь идёт через сигналы Qt:
+    logMessage(level, text)   — сообщения логгера «hardware» (для окна журнала);
+    stateChanged()            — что-то изменилось, UI должен перерисоваться;
+    busyChanged(bool)         — идёт ли сейчас выполнение команды;
+    commandFinished(name, ok) — команда завершилась (имя, успех).
+"""
+
 from __future__ import annotations
 
 import logging
+import time
 
 from PyQt5.QtCore import (
     QObject, QThread, QMetaObject, pyqtSignal, pyqtSlot, Qt,
@@ -29,6 +63,32 @@ class _SignalLogHandler(logging.Handler):
                                          record.getMessage())
 
 
+def process_readiness(s: dict):
+    """(can_start, reason) — выполнены ли ВСЕ условия запуска процесса.
+
+    Единый источник правды для чек-листа «Условия запуска» и доступности
+    кнопки «Запуск процесса» на всех страницах. Порядок проверок повторяет
+    ProcessController._check_start_conditions; возвращается первая
+    невыполненная причина (или "" если всё готово).
+    """
+    if s.get("process_running") or s.get("process", {}).get("running"):
+        return False, "Процесс уже идёт"
+    checks = [
+        (s["initialized"],      "Сначала выполните инициализацию"),
+        (s["acdc"]["on"],       "Нет питания AC/DC"),
+        (s["lid"]["closed"],    "Закройте крышку рабочей зоны"),
+        (not s["temp"]["over"], "Перегрев — дождитесь остывания"),
+        (s["laser"]["ready"],   "Настройте лазер (задайте мощность > 0 Вт)"),
+        (s["table"]["online"],  "Контроллер стола не на связи"),
+        (s.get("toolpath", {}).get("loaded", False),
+                                "Загрузите программу обработки (контур)"),
+    ]
+    for ok, reason in checks:
+        if not ok:
+            return False, reason
+    return True, ""
+
+
 def _compute_alarms(s: dict) -> list:
     """Активные аварии/предупреждения по снимку: список (severity, text, source).
 
@@ -50,9 +110,12 @@ def _compute_alarms(s: dict) -> list:
     if not s["acdc"]["on"]:
         out.append(("warn", "Нет питания AC/DC — запуск невозможен",
                     "ac_dc_converter.is_on()"))
-    if s["acdc"]["on"] and not s["tank"]["ready"] and not s["process_running"]:
-        out.append(("warn", "Ёмкость для полировки не готова",
-                    "polishing_tank.is_ready()"))
+    if s["acdc"]["on"] and not s["laser"]["ready"] and not s["process_running"]:
+        out.append(("warn", "Лазер не настроен (мощность 0 Вт)",
+                    "laser.is_ready()"))
+    if s["acdc"]["on"] and not s["table"]["online"] and not s["process_running"]:
+        out.append(("warn", "Контроллер стола не на связи",
+                    "table_controller.online"))
     psu = s["psu"]
     if psu["on"] and psu["limit"] * 0.9 <= psu["i"] <= psu["limit"]:
         out.append(("warn", f"Ток близок к лимиту: {psu['i']:.1f} / {psu['limit']:.1f} А",
@@ -87,11 +150,16 @@ class _HardwareWorker(QObject):
         # выполнять прямо здесь — UI всё равно не пострадает.)
         self.hw.stepper_motor.set_async_motion(True, scale=0.4)
 
-        # Карта команд: имя -> вызываемое. Совпадает с прежними целями _do().
+        # Момент предыдущего опроса — для подсчёта реального dt прогресса процесса.
+        self._last_poll: float | None = None
+
+        # Карта команд: имя -> вызываемое.
         self._dispatch = {
             "initialize": self.process.initialize,
             "start_process": self.process.start_process,
             "stop_process": self.process.stop_process,
+            "pause_process": self.process.pause_process,
+            "resume_process": self.process.resume_process,
             "emergency_stop": self.process.emergency_stop,
             "set_current_limit": self.hw.power_supply_48v.set_current_limit,
             "set_speed": self.process.set_motor_speed,
@@ -100,13 +168,17 @@ class _HardwareWorker(QObject):
             "set_load_power": self.hw.transistors.set_load_power,
             "reset_motor": self.hw.stepper_motor.reset_position,
             "stop_motor": self.hw.stepper_motor.stop,
+            "move_table": self.process.move_table_to,
+            "set_table_speed": self.process.set_table_speed,
+            "reset_table": self.hw.table.reset_position,
+            "stop_table": self.hw.table.stop,
+            "load_toolpath": self.process.set_toolpath,
+            "clear_toolpath": self.process.clear_toolpath,
+            "set_laser_param": self.hw.laser.set_param,
+            "set_laser_mode": self.hw.laser.set_mode,
             "set_channel": self._set_channel,
             "acdc_on": self.hw.ac_dc_converter.turn_on,
             "acdc_off": self.hw.ac_dc_converter.turn_off,
-            "fill_tank": self.hw.polishing_tank.fill,
-            "drain_tank": self.hw.polishing_tank.drain,
-            "connect_electrodes": self.hw.polishing_tank.connect_electrodes,
-            "disconnect_electrodes": self.hw.polishing_tank.disconnect_electrodes,
             "set_lid": self.test.set_lid,
             "set_temperature": self.test.set_temperature,
             "simulate_current": self._simulate_current,
@@ -141,6 +213,11 @@ class _HardwareWorker(QObject):
     @pyqtSlot()
     def poll(self) -> None:
         """Периодический мониторинг безопасности + рассылка снимка."""
+        now = time.monotonic()
+        if self._last_poll is not None:
+            self.process.advance_progress(now - self._last_poll)
+        self._last_poll = now
+        self.process.drive_scan()
         self.process.check_safety()
         self.snapshotReady.emit(self._snapshot())
 
@@ -151,7 +228,17 @@ class _HardwareWorker(QObject):
         return {
             "initialized": p.initialized,
             "process_running": p.process_running,
+            "process": {
+                "running": p.process_running,
+                "paused": p.paused,
+                "progress": p.progress,
+                "duration": p.PROCESS_DURATION,
+            },
             "system_status": p.get_system_status(),
+            "toolpath": {
+                "loaded": bool(p.toolpath),
+                "points": len(p.toolpath),
+            },
             "acdc": {
                 "on": hw.ac_dc_converter.is_on(),
                 "vin": hw.ac_dc_converter.get_input_voltage(),
@@ -169,7 +256,6 @@ class _HardwareWorker(QObject):
                     } for c in ch
                 },
             },
-            "vibro": {"on": hw.vibro_table.is_vibrating()},
             "psu": {
                 "on": hw.power_supply_48v.is_on(),
                 "v": hw.power_supply_48v.get_voltage(),
@@ -186,18 +272,31 @@ class _HardwareWorker(QObject):
                 "connected": hw.stepper_motor.driver is hw.stepper_driver,
             },
             "motor": {
-                "pos": hw.stepper_motor.get_position(),
+                "x": hw.stepper_motor.pos["x"],
+                "z": hw.stepper_motor.pos["z"],
                 "min": hw.stepper_motor.min_position,
                 "max": hw.stepper_motor.max_position,
                 "moving": hw.stepper_motor.moving,
             },
-            "tank": {
-                "filled": hw.polishing_tank.filled,
-                "anode": hw.polishing_tank.anode_connected,
-                "cathode": hw.polishing_tank.cathode_connected,
-                "running": hw.polishing_tank.is_process_running(),
-                "volt": hw.polishing_tank.get_applied_voltage(),
-                "ready": hw.polishing_tank.is_ready(),
+            "table": {
+                "pos": hw.table.get_position(),
+                "min": hw.table.min_position,
+                "max": hw.table.max_position,
+                "moving": hw.table.moving,
+                "online": hw.table_controller.online,
+                "enabled": hw.table_controller.enabled,
+                "speed": hw.table_controller.speed,
+            },
+            "laser": {
+                "powered": hw.laser.powered,
+                "emitting": hw.laser.is_emitting(),
+                "ready": hw.laser.is_ready(),
+                "power": hw.laser.power,
+                "frequency": hw.laser.frequency,
+                "focus": hw.laser.focus,
+                "pulse": hw.laser.pulse,
+                "exposure": hw.laser.exposure,
+                "mode": hw.laser.mode.value,
             },
             "temp": {
                 "t": hw.temperature_sensor.read_temperature(),
@@ -271,6 +370,8 @@ class DeviceController(QObject):
     def initialize(self):      self._request("initialize")
     def start_process(self):   self._request("start_process")
     def stop_process(self):    self._request("stop_process")
+    def pause_process(self):   self._request("pause_process")
+    def resume_process(self):  self._request("resume_process")
     def emergency_stop(self):  self._request("emergency_stop")
 
     # ------------------------------------------------------------------
@@ -278,7 +379,7 @@ class DeviceController(QObject):
     # ------------------------------------------------------------------
     def set_current_limit(self, v): self._request("set_current_limit", v)
     def set_speed(self, v):         self._request("set_speed", v)
-    def move_to(self, v):           self._request("move_to", v)
+    def move_to(self, x=None, z=None): self._request("move_to", x, z)
     def set_max_temp(self, v):      self._request("set_max_temp", v)
     def set_load_power(self, on):   self._request("set_load_power", on)
     def reset_motor(self):          self._request("reset_motor")
@@ -291,12 +392,24 @@ class DeviceController(QObject):
     def acdc_off(self): self._request("acdc_off")
 
     # ------------------------------------------------------------------
-    # Подготовка ёмкости — реальные операции устройства (не стенд)
+    # Координатный стол (одна ось, отдельный контроллер)
     # ------------------------------------------------------------------
-    def fill_tank(self):             self._request("fill_tank")
-    def drain_tank(self):            self._request("drain_tank")
-    def connect_electrodes(self):    self._request("connect_electrodes")
-    def disconnect_electrodes(self): self._request("disconnect_electrodes")
+    def move_table(self, pos):       self._request("move_table", pos)
+    def set_table_speed(self, v):    self._request("set_table_speed", v)
+    def reset_table(self):           self._request("reset_table")
+    def stop_table(self):            self._request("stop_table")
+
+    # ------------------------------------------------------------------
+    # Программа обработки (плоский контур из DXF/SVG/PLT/HPGL)
+    # ------------------------------------------------------------------
+    def load_toolpath(self, points): self._request("load_toolpath", points)
+    def clear_toolpath(self):        self._request("clear_toolpath")
+
+    # ------------------------------------------------------------------
+    # Лазерный излучатель (параметры с вкладки «Лазером»)
+    # ------------------------------------------------------------------
+    def set_laser_param(self, key, value): self._request("set_laser_param", key, value)
+    def set_laser_mode(self, mode):        self._request("set_laser_mode", mode)
 
     # ------------------------------------------------------------------
     # Имитация сигналов датчиков (TestHarness — только стенд)

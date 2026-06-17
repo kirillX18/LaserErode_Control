@@ -1,3 +1,7 @@
+"""
+labels.py — текстовые метки с готовым оформлением.
+"""
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QLabel
 

@@ -1,3 +1,13 @@
+"""
+status_blocks.py — крупные панели «состояние/диагностика»:
+
+    AlarmPanel       — блок активных ошибок и предупреждений (.alarm-list);
+    EventLogPanel    — журнал событий логгера «hardware» (.log);
+    DiagnosticsPanel — текстовый дамп get_system_status() (.diag).
+
+Все три — наследники BasePanel, поэтому выглядят как обычные панели приложения.
+"""
+
 from datetime import datetime
 
 from PyQt5.QtWidgets import (

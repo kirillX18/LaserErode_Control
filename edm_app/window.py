@@ -1,3 +1,15 @@
+"""
+window.py — главное окно приложения.
+
+Шапка + строка общего состояния устройства (MasterStatusBar) + верхние
+вкладки. Страницы берутся из реестра PAGES.
+
+Все страницы и строка состояния используют один общий DeviceController
+(controller()), поэтому показывают согласованное состояние. Здесь же запущен
+единый таймер мониторинга, который раз в секунду вызывает check_safety()
+(через poll()).
+"""
+
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QTabWidget, QLabel, QApplication,
     QTabBar, QScrollArea, QAbstractSpinBox,
@@ -35,7 +47,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(central)
 
         header = QLabel(APP_TITLE)
-        header.setAlignment(Qt.AlignCenter)
+        header.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         header.setStyleSheet(theme.header_style())
         layout.addWidget(header)
 
@@ -117,8 +129,28 @@ class MainWindow(QMainWindow):
         if index >= 0:
             self.tabs.setCurrentIndex(index)
 
+    def navigate_to(self, top_title: str, inner_title: str = None) -> None:
+        """Перейти на верхнюю вкладку и (опц.) на внутреннюю вкладку сервиса.
+
+        Используется чек-листом «Условия запуска» как «маршрут исправления»:
+        клик по невыполненному условию ведёт туда, где его можно устранить.
+        """
+        page = self.pages.get(top_title)
+        if page is None:
+            return
+        idx = self.tabs.indexOf(page)
+        if idx >= 0:
+            self.tabs.setCurrentIndex(idx)
+        if inner_title:
+            inner = getattr(page, "tabs_widget", None)
+            if isinstance(inner, QTabWidget):
+                for j in range(inner.count()):
+                    if inner.tabText(j) == inner_title:
+                        inner.setCurrentIndex(j)
+                        break
+
     def _trigger_emergency_stop(self) -> None:
-        """Аварийная остановка по горячей клавише (Enter).
+        """Аварийная остановка по горячей клавише (Esc).
 
         Если на текущей странице есть кнопка «АВАРИЙНЫЙ СТОП» — «нажимаем»
         именно её (animateClick: видимая анимация нажатия + штатный сигнал
@@ -136,7 +168,7 @@ class MainWindow(QMainWindow):
     #
     # Иерархия вкладок «расплющивается» в один кольцевой список:
     #   Процесс → Узлы оборудования →
-    #   Сервисное управление[Шаговый привод → Эрозия и полировка →
+    #   Сервисное управление[Шаговый привод → Координатный стол →
     #                         Лазером → Параметры устройства] → (снова Процесс)
     # Переключение: Ctrl+Tab / Ctrl+PageUp/PageDown (по кольцу) и Ctrl+N
     # (прямой переход). Обычный Tab оставлен под штатный обход фокуса.
@@ -206,9 +238,10 @@ class MainWindow(QMainWindow):
             "ДЕЙСТВИЯ С ВЫДЕЛЕННЫМ ЭЛЕМЕНТОМ\n"
             "    Пробел — нажать кнопку / переключить флажок\n"
             "    ↑ / ↓ — изменить число в поле\n"
+            "    Enter — применить значение в поле ввода\n"
             "    цифры — ввести значение прямо в поле\n\n"
             "БЕЗОПАСНОСТЬ\n"
-            "    Enter — АВАРИЙНАЯ ОСТАНОВКА (в любой момент)\n\n"
+            "    Esc — АВАРИЙНАЯ ОСТАНОВКА (в любой момент)\n\n"
             "ПЕРЕКЛЮЧЕНИЕ СТРАНИЦ\n"
             "    Ctrl+Tab / Ctrl+Shift+Tab — следующая / предыдущая\n"
             "    Ctrl+PageDown / Ctrl+PageUp — то же самое\n"
@@ -246,12 +279,14 @@ class MainWindow(QMainWindow):
             self._show_key_help()
             return True
 
-        # Enter — аварийная остановка в любой момент (главная «горячая» кнопка
-        # безопасности). Не перехватываем при открытом модальном диалоге: там
-        # Enter должен подтверждать. Автоповтор удержанной клавиши игнорируем.
-        if (not ctrl and key in (Qt.Key_Return, Qt.Key_Enter)
-                and not event.isAutoRepeat()
-                and QApplication.activeModalWidget() is None):
+        # Esc — аварийная остановка в любой момент. Отдельная заметная клавиша;
+        # Enter оставлен под штатное «применить/подтвердить» в полях ввода.
+        # Если открыт модальный диалог (справка F1, подтверждение остановки) —
+        # не перехватываем Esc, чтобы клавиша штатно закрыла этот диалог.
+        # Автоповтор удержанной клавиши игнорируем.
+        if (key == Qt.Key_Escape and not event.isAutoRepeat()
+                and QApplication.activeModalWidget() is None
+                and QApplication.activePopupWidget() is None):
             self._trigger_emergency_stop()
             return True
 

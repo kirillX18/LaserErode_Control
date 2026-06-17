@@ -1,3 +1,11 @@
+"""
+theme.py — единый источник правды для оформления.
+
+Здесь собраны: палитра цветов, глобальная таблица стилей (QSS) и фабрика
+шрифтов. Любое изменение дизайна делается в одном месте и применяется ко
+всему приложению, без правки отдельных виджетов.
+"""
+
 from PyQt5.QtGui import QFont
 
 
@@ -14,6 +22,10 @@ class Palette:
     RED = "#d52020"
     RED_HOVER = "#e23232"
     RED_PRESSED = "#b01818"
+
+    AMBER = "#e0a800"          # янтарный — управляемая остановка (не авария)
+    AMBER_HOVER = "#f0b90b"
+    AMBER_PRESSED = "#c79100"
 
     GRAY = "#cfcfcf"
     HEADER_BG = "#7a7a7a"
@@ -45,6 +57,7 @@ ROLE_DANGER = "danger"     # широкая красная кнопка ("Вер
 ROLE_RED = "red"           # маленькая красная кнопка ("−")
 ROLE_SMALL = "small"       # компактная кнопка шага
 ROLE_GRAY = "gray"         # серая кнопка ("Назад")
+ROLE_STOP = "stop"         # янтарная кнопка управляемой остановки
 
 
 # Глобальная таблица стилей. Строится из палитры, чтобы не дублировать цвета.
@@ -95,8 +108,13 @@ QPushButton#{ROLE_GRAY} {{
     color: black;
 }}
 
+QPushButton#{ROLE_STOP}            {{ background: {Palette.AMBER}; color: black; }}
+QPushButton#{ROLE_STOP}:hover      {{ background: {Palette.AMBER_HOVER}; }}
+QPushButton#{ROLE_STOP}:pressed    {{ background: {Palette.AMBER_PRESSED}; }}
+
 QPushButton#{ROLE_DANGER}:disabled,
 QPushButton#{ROLE_RED}:disabled,
+QPushButton#{ROLE_STOP}:disabled,
 QPushButton#{ROLE_GRAY}:disabled {{ background: #cfcfcf; color: #888888; }}
 
 QLineEdit, QDoubleSpinBox, QSpinBox, QTextEdit, QPlainTextEdit, QListWidget {{
@@ -137,9 +155,10 @@ def title_style() -> str:
 
 
 def header_style() -> str:
-    """Стиль для главной шапки окна."""
+    """Стиль для главной шапки окна (тонкая полоса: имя несёт и заголовок окна,
+    поэтому баннер не «съедает» рабочую область)."""
     return (f"background:{Palette.HEADER_BG}; color:white; "
-            f"padding:6px; font-weight:bold;")
+            f"padding:3px 8px; font-size:11px;")
 
 
 # --- помощники оформления статусных виджетов (страница «Оборудование») ---

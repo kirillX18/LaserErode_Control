@@ -1,3 +1,19 @@
+"""
+laser_tab.py — вкладка «Лазером» (настройка параметров лазерного воздействия).
+
+Интерфейс ручной настройки лазера для электроэрозионной обработки. Слева —
+пять одинаковых по устройству блоков-параметров (мощность, частота импульсов,
+фокусное смещение, длительность импульса, время воздействия), справа — выбор
+режима излучения. Значения и режим передаются в DeviceController (set_laser_param /
+set_laser_mode), который применяет их к лазерному узлу заглушки; текущее
+применённое состояние подтягивается из snapshot()["laser"]. Результат каждого
+действия дополнительно отражается строкой внизу (LastMessageBar).
+
+Каждый блок-параметр построен из уже существующих компонентов: MetricRow
+показывает текущее (применённое) значение, числовое поле QSpinBox задаёт
+нужное, а PrimaryButton «Задать» применяет его.
+"""
+
 from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QSpinBox,
     QButtonGroup, QRadioButton,
@@ -5,44 +21,48 @@ from PyQt5.QtWidgets import (
 
 from ..base import BaseServiceTab, BasePanel
 from ..components import (
-    MetricRow, StepControl, PrimaryButton, LastMessageBar,
+    MetricRow, PrimaryButton, LastMessageBar,
 )
+from ..hardware import controller
 from .. import theme
 
 
 class _LaserParamPanel(BasePanel):
-    """Блок одного параметра лазера: поле ввода значения, кнопки шага и «Задать».
+    """Блок одного параметра лазера: поле ввода значения и кнопка «Задать».
 
     Текущее (применённое) значение показывается строкой сверху; нужное
-    значение набирается в числовом поле или подбирается кнопками шага
-    (±1 / ±10) и применяется кнопкой «Задать», которая сообщает его наружу
-    через колбэк on_apply(name, value).
+    значение набирается в числовом поле (нативные стрелки/↑↓ дают осмысленный
+    шаг — свой для каждого параметра) и применяется кнопкой «Задать», которая
+    сообщает его наружу через колбэк on_apply(name, value). Пока введённое
+    значение не применено, об этом сообщает строка-индикатор — иначе шаг по
+    стрелкам менял бы поле, не трогая прибор, без обратной связи.
     """
 
-    def __init__(self, title: str, lo: int, hi: int, on_apply,
+    def __init__(self, title: str, lo: int, hi: int, step: int, on_apply,
                  unit: str = "", parent=None):
         self._title_text = title
         self._lo, self._hi = lo, hi
+        self._step = step
         self._unit = unit
         self._value = 0
         self._on_apply = on_apply
         super().__init__(title, parent)
 
     def build(self) -> None:
-        # Текущее значение — строкой «подпись … значение», как на остальных
-        # вкладках (ср. «Текущая позиция:», «Текущая скорость:»).
+        # Текущее применённое значение — строкой «подпись … значение».
         self.value_row = MetricRow("Текущее значение:", self._fmt(0))
         self.body.addWidget(self.value_row)
 
-        # Строка ввода: подпись — поле со счётчиком — «Задать»
-        # (как «Задать скорость:» / «Задать лимит тока:» на других вкладках).
+        # Строка ввода: подпись — поле со счётчиком — «Задать».
         grid = QGridLayout()
         grid.addWidget(QLabel("Задать значение:"), 0, 0)
         self.spin = QSpinBox()
         self.spin.setRange(self._lo, self._hi)
+        self.spin.setSingleStep(self._step)     # осмысленный шаг под параметр
         self.spin.setValue(0)
         if self._unit:
             self.spin.setSuffix(f" {self._unit}")
+        self.spin.valueChanged.connect(self._on_spin_changed)
         grid.addWidget(self.spin, 0, 1)
         self.apply_btn = PrimaryButton("Задать")
         self.apply_btn.setMaximumWidth(120)
@@ -51,25 +71,52 @@ class _LaserParamPanel(BasePanel):
         grid.setColumnStretch(1, 1)
         self.body.addLayout(grid)
 
-        # Кнопки шага под полем: меняют значение в поле на ±1 / ±10.
-        self.steps = StepControl((1, 10), self._step,
-                                 label_first=False, minus_red=False)
-        self.body.addWidget(self.steps)
+        # Индикатор «введённое значение ещё не применено».
+        self.pending = QLabel("")
+        self.pending.setStyleSheet(
+            f"color:{theme.Palette.WARN}; font-size:11px;")
+        self.body.addWidget(self.pending)
 
     # ------------------------------------------------------------------
     def _fmt(self, value) -> str:
         """Значение с единицей измерения (если она задана)."""
         return f"{value} {self._unit}".rstrip() if self._unit else str(value)
 
-    def _step(self, delta: float) -> None:
-        # setValue сам ограничит значение диапазоном поля.
-        self.spin.setValue(int(self.spin.value() + delta))
+    def _on_spin_changed(self, _value) -> None:
+        self._update_pending()
+
+    def _update_pending(self) -> None:
+        changed = self.spin.value() != self._value
+        self.pending.setText(
+            "● значение не применено — нажмите «Задать»" if changed else "")
 
     def _apply(self) -> None:
         self._value = self.spin.value()
         self.value_row.set_value(self._fmt(self._value))
+        self._update_pending()
         if self._on_apply is not None:
             self._on_apply(self._title_text, self._value, self._unit)
+
+    def show_applied(self, value) -> None:
+        """Показать текущее применённое значение из состояния устройства.
+
+        Если оператор не вводил новое значение, поле ввода тоже подтягивается к
+        применённому — так заводские параметры (профиль под сталь) сразу видны
+        и в строке «Текущее значение», и в поле, без ложного «не применено».
+        """
+        no_pending = self.spin.value() == self._value
+        self._value = value
+        self.value_row.set_value(self._fmt(value))
+        if no_pending:
+            self.spin.blockSignals(True)
+            self.spin.setValue(value)
+            self.spin.blockSignals(False)
+        self._update_pending()
+
+    def set_param_enabled(self, enabled: bool, reason: str = "") -> None:
+        """Погасить/включить блок целиком (неприменимые в режиме параметры)."""
+        self.setEnabled(enabled)
+        self.setToolTip("" if enabled else reason)
 
     def value(self) -> int:
         return self._value
@@ -100,7 +147,7 @@ class _ModePanel(BasePanel):
         for i, name in enumerate(self.MODES):
             rb = QRadioButton(name)
             rb.setStyleSheet(self._SQUARE)
-            if i == 0:                      # по умолчанию — непрерывный режим
+            if name == "Импульсный":        # по умолчанию — режим под сталь
                 rb.setChecked(True)
             self.group.addButton(rb, i)
             self.body.addWidget(rb)
@@ -119,25 +166,50 @@ class _ModePanel(BasePanel):
 class LaserControlTab(BaseServiceTab):
     """Вкладка «Лазером»: параметры воздействия слева, режим излучения справа."""
 
-    # (название блока, нижняя граница, верхняя граница, единица измерения).
-    # Фокусное смещение регулируется «в обе стороны», поэтому может быть < 0.
+    # (название блока, нижняя граница, верхняя граница, шаг, единица).
+    # Диапазоны и шаг привязаны к физике параметра, а не к «большому круглому
+    # числу»: шаг подобран так, чтобы стрелки/↑↓ давали осмысленное изменение в
+    # рабочем диапазоне конкретного лазера. Фокус регулируется «в обе стороны».
     PARAM_SPECS = [
-        ("Мощность лазера",        0,       100000,  "Вт"),
-        ("Частота импульсов",      0,       100000,  "Гц"),
-        ("Фокусное смещение",     -100000,  100000,  "мкм"),
-        ("Длительность импульса",  0,       100000,  "мкс"),
-        ("Время воздействия",      0,       100000,  "мс"),
+        ("Мощность лазера",        0,      500,    5,    "Вт"),
+        ("Частота импульсов",      0,      100000, 500,  "Гц"),
+        ("Фокусное смещение",     -5000,   5000,   50,   "мкм"),
+        ("Длительность импульса",  0,      1000,   5,    "мкс"),
+        ("Время воздействия",      0,      10000,  50,   "мс"),
     ]
 
+    # Соответствие «название блока → ключ параметра в заглушке лазера».
+    PARAM_KEYS = {
+        "Мощность лазера":        "power",
+        "Частота импульсов":      "frequency",
+        "Фокусное смещение":      "focus",
+        "Длительность импульса":  "pulse",
+        "Время воздействия":      "exposure",
+    }
+
+    # Какие параметры применимы в каждом режиме излучения. Непрерывный режим
+    # не оперирует импульсами (частота/длительность не имеют смысла), одиночный
+    # импульс — это единичный выстрел (нет частоты и времени воздействия).
+    MODE_ENABLED = {
+        "Непрерывный": {"Мощность лазера", "Фокусное смещение",
+                        "Время воздействия"},
+        "Импульсный": {"Мощность лазера", "Частота импульсов",
+                       "Фокусное смещение", "Длительность импульса",
+                       "Время воздействия"},
+        "Одиночный импульс": {"Мощность лазера", "Фокусное смещение",
+                              "Длительность импульса"},
+    }
+
     def build_content(self, layout: QVBoxLayout) -> None:
+        self.ctl = controller()
         main = QHBoxLayout()
 
         # --- слева: блоки-параметры (сетка 2 колонки) ---
         grid = QGridLayout()
         self.params: dict[str, _LaserParamPanel] = {}
         positions = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0)]
-        for (name, lo, hi, unit), (r, c) in zip(self.PARAM_SPECS, positions):
-            panel = _LaserParamPanel(name, lo, hi,
+        for (name, lo, hi, step, unit), (r, c) in zip(self.PARAM_SPECS, positions):
+            panel = _LaserParamPanel(name, lo, hi, step,
                                      on_apply=self._apply_param, unit=unit)
             self.params[name] = panel
             grid.addWidget(panel, r, c)
@@ -159,10 +231,42 @@ class LaserControlTab(BaseServiceTab):
         self.status_line = LastMessageBar()
         layout.addWidget(self.status_line)
 
+        self.ctl.logMessage.connect(self.status_line.set_message)
+        self.ctl.stateChanged.connect(self._refresh)
+        self._apply_mode_gating(self.mode.current_mode())  # начальный режим
+        self._refresh()
+
     # ------------------------------------------------------------------
     def _apply_param(self, name: str, value: int, unit: str = "") -> None:
+        key = self.PARAM_KEYS.get(name)
+        if key is not None:
+            self.ctl.set_laser_param(key, value)
         shown = f"{value} {unit}".rstrip() if unit else str(value)
         self.status_line.set_message("info", f"{name}: задано значение {shown}")
 
     def _mode_changed(self, mode_text: str) -> None:
+        self.ctl.set_laser_mode(mode_text)
+        self._apply_mode_gating(mode_text)
         self.status_line.set_message("info", f"Режим работы: {mode_text.lower()}")
+
+    def _apply_mode_gating(self, mode_text: str) -> None:
+        """Погасить неприменимые в выбранном режиме параметры."""
+        enabled = self.MODE_ENABLED.get(mode_text, set(self.params))
+        for name, panel in self.params.items():
+            on = name in enabled
+            panel.set_param_enabled(
+                on, "" if on else f"Недоступно в режиме «{mode_text.lower()}»")
+
+    def _refresh(self) -> None:
+        las = self.ctl.snapshot()["laser"]
+        by_key = {
+            "power": "Мощность лазера",
+            "frequency": "Частота импульсов",
+            "focus": "Фокусное смещение",
+            "pulse": "Длительность импульса",
+            "exposure": "Время воздействия",
+        }
+        for key, name in by_key.items():
+            panel = self.params.get(name)
+            if panel is not None:
+                panel.show_applied(las[key])

@@ -1,3 +1,7 @@
+"""
+app.py — точка входа: создаёт QApplication, применяет тему и показывает окно.
+"""
+
 import sys
 
 from PyQt5.QtWidgets import QApplication

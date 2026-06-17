@@ -1,6 +1,21 @@
+"""
+hardware_page.py — страница «Оборудование (узлы)».
+
+Главная страница-перенос HTML-дизайна HMI в Qt. Слева — карточки 9 узлов
+устройства и форма параметров; справа — аварии, журнал и стендовая
+имитация. Сверху — панель быстрых действий. Вся логика идёт через
+DeviceController (адаптер к классам-заглушкам).
+
+Карточки строятся декларативно из CARD_SPECS, поэтому добавить новый узел —
+это одна запись в списке + одна строка в _refresh().
+"""
+
+import os
+
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QWidget, QSplitter, QScrollArea,
+    QMessageBox,
 )
 
 from ..base import BasePage
@@ -9,7 +24,13 @@ from ..blocks import (
     DeviceCard, AlarmPanel, EventLogPanel,
     QuickActionBar, TestHarnessPanel,
 )
-from ..hardware import controller, TransistorChannel
+from ..hardware import controller, process_readiness, TransistorChannel
+
+
+# Стендовая имитация сигналов датчиков — только в режиме разработчика
+# (переменная окружения EDM_DEV=1). В рабочем интерфейсе её нет, чтобы оператор
+# не мог «вручную» задать температуру/ток и навредить ложными данными.
+DEV_MODE = os.environ.get("EDM_DEV") == "1"
 
 
 class HardwarePage(BasePage):
@@ -18,6 +39,7 @@ class HardwarePage(BasePage):
     def build_content(self, layout: QVBoxLayout) -> None:
         self.ctl = controller()
         self.cards: dict[str, DeviceCard] = {}
+        self._paused = False
 
         # --- панель быстрых действий ---
         self.quick = QuickActionBar("Управление процессом")
@@ -74,10 +96,12 @@ class HardwarePage(BasePage):
             c.add_metric(ch.value, label)
         self.cards["trans"] = c
 
-        # Вибростол ------------------------------------------------------
-        c = DeviceCard("Вибростол")
-        c.add_metric("state", "Состояние")
-        self.cards["vibro"] = c
+        # Координатный стол ----------------------------------------------
+        c = DeviceCard("Координатный стол (ось Y)")
+        c.add_metric("ctrl", "Контроллер")
+        c.add_metric("pos", "Позиция")
+        c.add_bar("pos", "ok")
+        self.cards["table"] = c
 
         # Драйвер ШД -----------------------------------------------------
         c = DeviceCard("Драйвер ШД")
@@ -85,21 +109,19 @@ class HardwarePage(BasePage):
         c.add_metric("speed", "Скорость")
         self.cards["driver"] = c
 
-        # Шаговый двигатель ---------------------------------------------
-        c = DeviceCard("Шаговый двигатель")
-        c.add_metric("pos", "Позиция")
+        # Шаговый двигатель (X/Z) ---------------------------------------
+        c = DeviceCard("Шаговый двигатель (X/Z)")
+        c.add_metric("x", "Позиция X")
+        c.add_metric("z", "Позиция Z")
         c.add_metric("moving", "Движение")
-        c.add_bar("pos", "ok")
-        c.add_action("Сброс", self.ctl.reset_motor, role="gray")
-        c.add_action("Стоп", self.ctl.stop_motor, role="gray")
         self.cards["motor"] = c
 
-        # Ёмкость полировки ----------------------------------------------
-        c = DeviceCard("Ёмкость полировки")
-        c.add_metric("filled", "Рабочая жидкость")
-        c.add_metric("elec", "Анод / катод")
-        c.add_metric("volt", "Напряжение процесса")
-        self.cards["tank"] = c
+        # Лазерный излучатель --------------------------------------------
+        c = DeviceCard("Лазерный излучатель")
+        c.add_metric("power", "Мощность")
+        c.add_metric("freq", "Частота")
+        c.add_metric("mode", "Режим")
+        self.cards["laser"] = c
 
         # Датчик крышки --------------------------------------------------
         c = DeviceCard("Датчик крышки")
@@ -114,8 +136,8 @@ class HardwarePage(BasePage):
         self.cards["temp"] = c
 
         # Размещение: 2 колонки; «транзисторы» — на всю ширину.
-        order = ["acdc", "psu", "trans", "vibro", "driver",
-                 "motor", "tank", "lid", "temp"]
+        order = ["acdc", "psu", "trans", "table", "driver",
+                 "motor", "laser", "lid", "temp"]
         r = c0 = 0
         for key in order:
             card = self.cards[key]
@@ -139,11 +161,14 @@ class HardwarePage(BasePage):
 
         self.alarms = AlarmPanel("Ошибки и предупреждения")
         self.log = EventLogPanel("Журнал событий (logger «hardware»)")
-        self.harness = TestHarnessPanel()
 
         v.addWidget(self.alarms)
         v.addWidget(self.log, 1)
-        v.addWidget(self.harness)
+
+        # Стендовая имитация датчиков — только в режиме разработчика.
+        self.harness = TestHarnessPanel() if DEV_MODE else None
+        if self.harness is not None:
+            v.addWidget(self.harness)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -156,18 +181,46 @@ class HardwarePage(BasePage):
     def _wire(self) -> None:
         self.quick.init_button.clicked.connect(self.ctl.initialize)
         self.quick.start_button.clicked.connect(self.ctl.start_process)
-        self.quick.stop_button.clicked.connect(self.ctl.stop_process)
+        self.quick.pause_button.clicked.connect(self._toggle_pause)
+        self.quick.stop_button.clicked.connect(self._confirm_stop)
         self.quick.estop_button.clicked.connect(self.ctl.emergency_stop)
 
-        h = self.harness
-        h.lid_check.toggled.connect(self.ctl.set_lid)
-        h.temp_button.clicked.connect(
-            lambda: self.ctl.set_temperature(h.temp_spin.value()))
-        h.curr_button.clicked.connect(
-            lambda: self.ctl.simulate_current(h.curr_spin.value()))
+        # Стендовая имитация — только если панель построена (режим разработчика).
+        if self.harness is not None:
+            h = self.harness
+            h.lid_check.toggled.connect(self.ctl.set_lid)
+            h.temp_button.clicked.connect(
+                lambda: self.ctl.set_temperature(h.temp_spin.value()))
+            h.curr_button.clicked.connect(
+                lambda: self.ctl.simulate_current(h.curr_spin.value()))
 
         self.ctl.logMessage.connect(self.log.append)
         self.ctl.stateChanged.connect(self._refresh)
+
+    # ------------------------------------------------------------------
+    def _toggle_pause(self) -> None:
+        if self._paused:
+            self.ctl.resume_process()
+        else:
+            self.ctl.pause_process()
+
+    def _confirm_stop(self) -> None:
+        """Та же логика, что на странице «Процесс»: остановка сбрасывает
+        прогресс, поэтому требует подтверждения (HIG, гл. 3 «Alerts»)."""
+        if not self.ctl.snapshot().get("process_running"):
+            self.ctl.stop_process()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Остановить процесс?")
+        box.setText("Остановка прервёт обработку и сбросит прогресс в 0.")
+        box.setInformativeText("Продолжить остановку?")
+        yes = box.addButton("Остановить", QMessageBox.AcceptRole)
+        box.addButton("Отмена", QMessageBox.RejectRole)
+        box.setDefaultButton(yes)
+        box.exec_()
+        if box.clickedButton() is yes:
+            self.ctl.stop_process()
 
     # ==================================================================
     # ОБНОВЛЕНИЕ ВСЕХ ВИДЖЕТОВ ПО СНИМКУ СОСТОЯНИЯ
@@ -175,10 +228,19 @@ class HardwarePage(BasePage):
     def _refresh(self) -> None:
         s = self.ctl.snapshot()
 
-        # быстрые действия
+        # быстрые действия — те же условия и поведение, что на «Процессе»
+        proc = s.get("process", {})
+        running = bool(proc.get("running", s["process_running"]))
+        self._paused = bool(proc.get("paused", False))
+        can_start, reason = process_readiness(s)
         self.quick.set_enabled_states(
-            can_start=s["initialized"] and not s["process_running"],
-            can_stop=s["process_running"])
+            can_start=can_start,
+            can_stop=running,
+            can_pause=running,
+            paused=self._paused,
+            initialized=s["initialized"],
+            running=running,
+            start_reason=reason)
 
         on = lambda b: "ok" if b else "off"
 
@@ -213,10 +275,25 @@ class HardwarePage(BasePage):
                    f"{'нагрузка вкл' if c['load'] else 'нагрузка выкл'}")
             card.set_metric(name, txt, on(c["load"]))
 
-        # Вибростол
-        v = s["vibro"]; card = self.cards["vibro"]
-        card.set_state("Вибрация" if v["on"] else "Стоп", on(v["on"]))
-        card.set_metric("state", "вибрирует" if v["on"] else "остановлен", on(v["on"]))
+        # Координатный стол
+        tb = s["table"]; card = self.cards["table"]
+        if not tb["online"]:
+            card.set_state("Нет связи", "warn")
+        else:
+            card.set_state("Движение" if tb["moving"] else "Готов",
+                           "warn" if tb["moving"] else "ok")
+        if not tb["online"]:
+            ctrl_txt, ctrl_role = "нет связи", "warn"
+        elif tb["enabled"]:
+            ctrl_txt, ctrl_role = f"готов, {tb['speed']} шаг/с", "ok"
+        else:
+            ctrl_txt, ctrl_role = "движение запрещено", "off"
+        card.set_metric("ctrl", ctrl_txt, ctrl_role)
+        card.set_metric("pos", str(tb["pos"]),
+                        "warn" if tb["moving"] else "ok")
+        span = max(1, tb["max"] - tb["min"])
+        card.set_bar("pos", (tb["pos"] - tb["min"]) / span,
+                     "warn" if tb["moving"] else "ok")
 
         # Драйвер ШД
         d = s["driver"]; card = self.cards["driver"]
@@ -229,24 +306,27 @@ class HardwarePage(BasePage):
         card.set_metric("state", "включен" if d["enabled"] else "выключен", on(d["enabled"]))
         card.set_metric("speed", f"{d['speed']} шаг/с", "ok")
 
-        # Шаговый двигатель
+        # Шаговый двигатель (X/Z)
         m = s["motor"]; card = self.cards["motor"]
         card.set_state("Движение" if m["moving"] else "Стоп",
                        "warn" if m["moving"] else "off")
-        card.set_metric("pos", str(m["pos"]), "ok")
+        card.set_metric("x", str(m["x"]), "ok")
+        card.set_metric("z", str(m["z"]), "ok")
         card.set_metric("moving", "движется" if m["moving"] else "остановлен",
                         "warn" if m["moving"] else "off")
-        span = max(1, m["max"] - m["min"])
-        card.set_bar("pos", (m["pos"] - m["min"]) / span, "ok")
 
-        # Ёмкость
-        k = s["tank"]; card = self.cards["tank"]
-        card.set_state("Процесс" if k["running"] else ("Готова" if k["ready"] else "Не готова"),
-                       "ok" if k["running"] else ("off" if k["ready"] else "warn"))
-        card.set_metric("filled", "есть" if k["filled"] else "нет", on(k["filled"]))
-        elec = f"{'+' if k['anode'] else '−'} / {'+' if k['cathode'] else '−'}"
-        card.set_metric("elec", elec, on(k["anode"] and k["cathode"]))
-        card.set_metric("volt", f"{k['volt']:.1f} В", "ok")
+        # Лазер
+        lz = s["laser"]; card = self.cards["laser"]
+        if lz["emitting"]:
+            card.set_state("Излучение", "ok")
+        elif lz["ready"]:
+            card.set_state("Готов", "off")
+        else:
+            card.set_state("Не настроен", "warn")
+        card.set_metric("power", f"{lz['power']} Вт",
+                        "ok" if lz["emitting"] else on(lz["ready"]))
+        card.set_metric("freq", f"{lz['frequency']} Гц", "ok")
+        card.set_metric("mode", lz["mode"].lower(), "ok")
 
         # Крышка
         l = s["lid"]; card = self.cards["lid"]

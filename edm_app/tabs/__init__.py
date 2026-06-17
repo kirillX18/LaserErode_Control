@@ -1,17 +1,23 @@
-from .motor_tab import MotorControlTab
-from .erosion_polish_tab import ErosionPolishTab
+"""
+Вкладки сервисного управления — приведены в соответствие узлам устройства
+из классов-заглушек.
+
+Вкладки «Шаговый привод» и «Координатный стол» объединены в одну —
+«Позиционирование» (задание положения лазера по X/Y/Z + 3D над столом).
+X/Z — лазерная головка шагового привода, Y — подача координатного стола.
+"""
+
+from .positioning_tab import PositioningTab
 from .params_tab import ParametersTab
 from .laser_tab import LaserControlTab
 
 # Реестр вкладок: (заголовок, класс). Чтобы добавить новую — допишите строку.
 SERVICE_TABS = [
-    ("Шаговый привод", MotorControlTab),
-    ("Эрозия и полировка", ErosionPolishTab),
+    ("Позиционирование", PositioningTab),
     ("Лазером", LaserControlTab),
     ("Параметры устройства", ParametersTab),
 ]
 
 __all__ = [
-    "MotorControlTab", "ErosionPolishTab", "ParametersTab", "LaserControlTab",
-    "SERVICE_TABS",
+    "PositioningTab", "ParametersTab", "LaserControlTab", "SERVICE_TABS",
 ]

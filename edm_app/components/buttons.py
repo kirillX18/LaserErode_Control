@@ -1,3 +1,17 @@
+"""
+buttons.py — типизированные кнопки.
+
+Вместо того чтобы каждый раз вручную выставлять objectName и стиль, заводим
+небольшие классы-наследники QPushButton. Это убирает дублирование и делает
+код страниц декларативным: PrimaryButton("Задать") вместо трёх строк настройки.
+
+Все кнопки получают плавную анимацию наведения и нажатия: при наведении
+курсора кнопка «приподнимается» (растёт мягкая тень), при нажатии — слегка
+«проседает». Цвета по-прежнему задаёт QSS (см. theme.py), а здесь добавлена
+только моторика. Анимация не запускается для отключённых/недоступных кнопок,
+а при переходе в disabled тень мгновенно сбрасывается.
+"""
+
 from PyQt5.QtCore import QEvent, QPointF, QPropertyAnimation, QEasingCurve, Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QPushButton, QGraphicsDropShadowEffect
@@ -91,6 +105,25 @@ class _RoleButton(QPushButton):
             self._shadow.setBlurRadius(self._REST[0])
             self._shadow.setOffset(0.0, self._REST[1])
 
+    # ------------------------------------------------------------------
+    # Смена роли на лету
+    # ------------------------------------------------------------------
+    def set_role(self, role: str) -> None:
+        """Сменить семантическую роль (цвет/стиль) кнопки во время работы.
+
+        Нужна, например, панели быстрых действий: «Инициализация» главная на
+        этапе подготовки, а после инициализации главной становится «Запуск».
+        objectName управляет стилем через QSS, поэтому достаточно его сменить
+        и перезапросить стиль.
+        """
+        if role == self.role:
+            return
+        self.role = role
+        self.setObjectName(role or "")
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
 
 class PrimaryButton(_RoleButton):
     """Зелёная кнопка по умолчанию (основное действие)."""
@@ -118,3 +151,8 @@ class GrayButton(_RoleButton):
     """Серая нейтральная кнопка («Назад»)."""
     role = theme.ROLE_GRAY
     max_width = 90
+
+
+class StopButton(_RoleButton):
+    """Янтарная кнопка управляемой остановки (не аварийной)."""
+    role = theme.ROLE_STOP

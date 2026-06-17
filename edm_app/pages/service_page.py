@@ -1,3 +1,10 @@
+"""
+service_page.py — страница «Сервисное управление» и контейнер её вкладок.
+
+ServiceControlTabs автоматически собирает все вкладки из реестра SERVICE_TABS,
+поэтому добавление новой вкладки не требует правок здесь.
+"""
+
 from PyQt5.QtWidgets import QVBoxLayout, QTabWidget
 
 from ..base import BasePage

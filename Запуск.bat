@@ -8,7 +8,7 @@ REM Перейти в папку, где лежит этот .bat (рядом д
 cd /d "%~dp0"
 
 echo Проверка зависимостей (PyQt5)...
-python -m pip install --quiet PyQt5
+python -m pip install --quiet PyQt5 PyOpenGL
 
 echo Запуск программы...
 python main.py
