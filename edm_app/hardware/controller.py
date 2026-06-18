@@ -79,9 +79,11 @@ def process_readiness(s: dict):
         (s["lid"]["closed"],    "Закройте крышку рабочей зоны"),
         (not s["temp"]["over"], "Перегрев — дождитесь остывания"),
         (s["laser"]["ready"],   "Настройте лазер (задайте мощность > 0 Вт)"),
-        (s["table"]["online"],  "Контроллер стола не на связи"),
-        (s.get("toolpath", {}).get("loaded", False),
-                                "Загрузите программу обработки (контур)"),
+        (s["robot"]["online"],  "Контроллер робота не на связи"),
+        (s["fixture"]["clamped"], "Зафиксируйте деталь в креплении"),
+        (s.get("toolpath", {}).get("loaded", False)
+            or s.get("part", {}).get("loaded", False),
+            "Загрузите программу обработки (контур) или 3D-модель детали"),
     ]
     for ok, reason in checks:
         if not ok:
@@ -102,24 +104,31 @@ def _compute_alarms(s: dict) -> list:
         out.append(("err", f"Перегрев: {s['temp']['t']:.1f} °C > {s['temp']['max']:.0f} °C",
                     "temperature_sensor.is_overheated()"))
     if s["psu"]["tripped"]:
-        out.append(("err", "Перегрузка по току источника 48 В",
-                    "power_supply_48v.overcurrent_tripped"))
+        out.append(("err", "Перегрузка по току источника эрозии",
+                    "edm_power_supply.overcurrent_tripped"))
     if s["process_running"] and not s["psu"]["on"]:
-        out.append(("err", "Источник 48 В отключился во время процесса",
-                    "power_supply_48v.is_on()"))
+        out.append(("err", "Источник эрозии отключился во время процесса",
+                    "edm_power_supply.is_on()"))
+    if s["process_running"] and not s.get("process", {}).get("paused") \
+            and not s["water"]["flowing"]:
+        out.append(("err", "Нет подачи воды — потеря охлаждения",
+                    "water.is_flowing()"))
     if not s["acdc"]["on"]:
         out.append(("warn", "Нет питания AC/DC — запуск невозможен",
                     "ac_dc_converter.is_on()"))
     if s["acdc"]["on"] and not s["laser"]["ready"] and not s["process_running"]:
         out.append(("warn", "Лазер не настроен (мощность 0 Вт)",
                     "laser.is_ready()"))
-    if s["acdc"]["on"] and not s["table"]["online"] and not s["process_running"]:
-        out.append(("warn", "Контроллер стола не на связи",
-                    "table_controller.online"))
+    if s["acdc"]["on"] and not s["robot"]["online"] and not s["process_running"]:
+        out.append(("warn", "Контроллер робота не на связи",
+                    "robot_controller.online"))
+    if s["acdc"]["on"] and not s["fixture"]["clamped"] and not s["process_running"]:
+        out.append(("warn", "Деталь не зафиксирована в креплении",
+                    "fixture.is_clamped()"))
     psu = s["psu"]
     if psu["on"] and psu["limit"] * 0.9 <= psu["i"] <= psu["limit"]:
         out.append(("warn", f"Ток близок к лимиту: {psu['i']:.1f} / {psu['limit']:.1f} А",
-                    "power_supply_48v.get_current()"))
+                    "edm_power_supply.get_current()"))
     return out
 
 
@@ -144,11 +153,10 @@ class _HardwareWorker(QObject):
         self.process = ProcessController(self.hw)
         self.test = TestHarness(self.hw, self.process)
 
-        # Фоновое движение ШД остаётся включённым: стаб сам имитирует ход в своём
-        # потоке, индикатор «движется» виден до завершения. Поток воркера при
-        # этом свободен. (Для реального железа, если ход блокирующий, его можно
-        # выполнять прямо здесь — UI всё равно не пострадает.)
-        self.hw.stepper_motor.set_async_motion(True, scale=0.4)
+        # Фоновое движение руки остаётся включённым: стаб сам имитирует ход в
+        # своём потоке, индикатор «движется» виден до завершения. Поток воркера
+        # при этом свободен.
+        self.hw.arm.set_async_motion(True, scale=0.4)
 
         # Момент предыдущего опроса — для подсчёта реального dt прогресса процесса.
         self._last_poll: float | None = None
@@ -161,33 +169,57 @@ class _HardwareWorker(QObject):
             "pause_process": self.process.pause_process,
             "resume_process": self.process.resume_process,
             "emergency_stop": self.process.emergency_stop,
-            "set_current_limit": self.hw.power_supply_48v.set_current_limit,
-            "set_speed": self.process.set_motor_speed,
-            "move_to": self.process.move_motor_to,
+            "set_current_limit": self.hw.edm_power_supply.set_current_limit,
             "set_max_temp": self.hw.temperature_sensor.set_max_temperature,
             "set_load_power": self.hw.transistors.set_load_power,
-            "reset_motor": self.hw.stepper_motor.reset_position,
-            "stop_motor": self.hw.stepper_motor.stop,
-            "move_table": self.process.move_table_to,
-            "set_table_speed": self.process.set_table_speed,
-            "reset_table": self.hw.table.reset_position,
-            "stop_table": self.hw.table.stop,
-            "load_toolpath": self.process.set_toolpath,
-            "clear_toolpath": self.process.clear_toolpath,
-            "set_laser_param": self.hw.laser.set_param,
-            "set_laser_mode": self.hw.laser.set_mode,
             "set_channel": self._set_channel,
             "acdc_on": self.hw.ac_dc_converter.turn_on,
             "acdc_off": self.hw.ac_dc_converter.turn_off,
+            "load_toolpath": self.process.set_toolpath,
+            "clear_toolpath": self.process.clear_toolpath,
+            "set_part_loaded": self.process.set_part_loaded,
+            "set_machining_motion": self.process.set_machining_motion,
+            "set_laser_param": self.hw.laser.set_param,
+            "set_laser_mode": self.hw.laser.set_mode,
+            # --- рука и контроллер робота ---
+            "set_speed": self.process.set_arm_speed,
+            "set_arm_speed": self.process.set_arm_speed,
+            "move_to": self.process.move_tool_to,
+            "move_tool": self.process.move_tool_to,
+            "move_joint": self.process.move_joint,
+            "reset_motor": self._home_arm,
+            "home_arm": self._home_arm,
+            "stop_motor": self.hw.arm.stop,
+            "stop_arm": self.hw.arm.stop,
+            # --- совместимость со старым «столом» (Y теперь — ось руки) ---
+            "move_table": self._move_table_compat,
+            "set_table_speed": self.process.set_arm_speed,
+            "reset_table": self._home_arm,
+            "stop_table": self.hw.arm.stop,
+            # --- система воды ---
+            "set_water": self.process.set_water_supply,
+            "set_drain": self.process.set_drain,
+            # --- крепление детали ---
+            "clamp_fixture": self.process.clamp_fixture,
+            # --- имитация сигналов датчиков (стенд) ---
             "set_lid": self.test.set_lid,
             "set_temperature": self.test.set_temperature,
             "simulate_current": self._simulate_current,
+            "simulate_water_flow": self.test.simulate_water_flow,
+            "simulate_water_pressure": self.test.simulate_water_pressure,
         }
 
     # --- обёртки для команд со своей логикой ---------------------------
     def _set_channel(self, channel: TransistorChannel, on: bool):
         fn = self.hw.transistors.turn_on if on else self.hw.transistors.turn_off
         return fn(channel)
+
+    def _home_arm(self):
+        return self.hw.arm.home()
+
+    def _move_table_compat(self, y):
+        """Старая команда «стол по Y» — теперь это перемещение руки по оси Y."""
+        return self.process.move_tool_to(y=y)
 
     def _simulate_current(self, v):
         result = self.test.simulate_current(v)
@@ -225,6 +257,9 @@ class _HardwareWorker(QObject):
     def _snapshot(self) -> dict:
         hw, p = self.hw, self.process
         ch = hw.transistors.channels
+        arm = hw.arm
+        rc = hw.robot_controller
+        edm = hw.edm_power_supply
         return {
             "initialized": p.initialized,
             "process_running": p.process_running,
@@ -238,6 +273,9 @@ class _HardwareWorker(QObject):
             "toolpath": {
                 "loaded": bool(p.toolpath),
                 "points": len(p.toolpath),
+            },
+            "part": {
+                "loaded": bool(p.part_loaded),
             },
             "acdc": {
                 "on": hw.ac_dc_converter.is_on(),
@@ -256,37 +294,39 @@ class _HardwareWorker(QObject):
                     } for c in ch
                 },
             },
-            "psu": {
-                "on": hw.power_supply_48v.is_on(),
-                "v": hw.power_supply_48v.get_voltage(),
-                "i": hw.power_supply_48v.get_current(),
-                "limit": hw.power_supply_48v.current_limit,
-                "max_limit": hw.power_supply_48v.max_current_limit,
-                "tripped": hw.power_supply_48v.overcurrent_tripped,
+            # Источник эрозии (основной силовой источник с защитой по току).
+            "edm": {
+                "on": edm.is_on(),
+                "v": edm.get_voltage(),
+                "i": edm.get_current(),
+                "limit": edm.current_limit,
+                "max_limit": edm.max_current_limit,
+                "tripped": edm.overcurrent_tripped,
+            },
+            "laser_psu": {
+                "on": hw.laser_power_supply.is_on(),
+                "v": hw.laser_power_supply.get_voltage(),
             },
             "lid": {"closed": hw.lid_sensor.is_closed()},
-            "driver": {
-                "enabled": hw.stepper_driver.enabled,
-                "moving": hw.stepper_driver.moving,
-                "speed": hw.stepper_driver.speed,
-                "connected": hw.stepper_motor.driver is hw.stepper_driver,
+            # Контроллер 8-суставного робота.
+            "robot": {
+                "online": rc.online,
+                "enabled": rc.enabled,
+                "moving": rc.moving,
+                "speed": rc.speed,
             },
-            "motor": {
-                "x": hw.stepper_motor.pos["x"],
-                "z": hw.stepper_motor.pos["z"],
-                "min": hw.stepper_motor.min_position,
-                "max": hw.stepper_motor.max_position,
-                "moving": hw.stepper_motor.moving,
+            # Роботизированная 8-суставная рука: положение инструмента + суставы.
+            "arm": {
+                "x": arm.tool["x"], "y": arm.tool["y"], "z": arm.tool["z"],
+                "ranges": {a: list(arm.ranges[a]) for a in arm.AXES},
+                "joints": {j: v for j, v in arm.get_joints().items()},
+                "limits": {j: list(lim) for j, lim in arm.JOINT_LIMITS.items()},
+                "moving": arm.moving,
             },
-            "table": {
-                "pos": hw.table.get_position(),
-                "min": hw.table.min_position,
-                "max": hw.table.max_position,
-                "moving": hw.table.moving,
-                "online": hw.table_controller.online,
-                "enabled": hw.table_controller.enabled,
-                "speed": hw.table_controller.speed,
-            },
+            # Лазерно-эрозионная рабочая головка.
+            "head": {"machining": hw.head.is_machining()},
+            "cathode": {"connected": hw.cathode.connected, "active": hw.cathode.active},
+            "anode": {"connected": hw.anode.connected},
             "laser": {
                 "powered": hw.laser.powered,
                 "emitting": hw.laser.is_emitting(),
@@ -298,10 +338,60 @@ class _HardwareWorker(QObject):
                 "exposure": hw.laser.exposure,
                 "mode": hw.laser.mode.value,
             },
+            # Система подачи воды.
+            "water": {
+                "pump": hw.water.pump_on,
+                "valve": hw.water.valve_open,
+                "pressure": hw.water.get_pressure(),
+                "flow": hw.water.get_flow(),
+                "flowing": hw.water.is_flowing(),
+                "drain": hw.water.drain_open,
+                "min_flow": hw.water.min_flow,
+            },
+            # Неподвижное крепление детали.
+            "fixture": {"clamped": hw.fixture.is_clamped()},
             "temp": {
                 "t": hw.temperature_sensor.read_temperature(),
                 "max": hw.temperature_sensor.max_temperature,
                 "over": hw.temperature_sensor.is_overheated(),
+            },
+
+            # ----------------------------------------------------------------
+            # Обратная совместимость со старым UI (ШД + стол + источник 48 В).
+            # Позиционирование теперь выполняет рука: X/Z — оси инструмента,
+            # Y — третья ось руки (бывший «стол»). Источник «psu» = источник
+            # эрозии. Эти алиасы позволяют существующим вкладкам работать без
+            # правок до их миграции на ключи arm/robot/edm/water/fixture.
+            # ----------------------------------------------------------------
+            "motor": {
+                "x": int(round(arm.tool["x"])),
+                "z": int(round(arm.tool["z"])),
+                "min": arm.ranges["x"][0],
+                "max": arm.ranges["x"][1],
+                "moving": arm.moving,
+            },
+            "table": {
+                "pos": int(round(arm.tool["y"])),
+                "min": arm.ranges["y"][0],
+                "max": arm.ranges["y"][1],
+                "moving": arm.moving,
+                "online": rc.online,
+                "enabled": rc.enabled,
+                "speed": rc.speed,
+            },
+            "driver": {
+                "enabled": rc.enabled,
+                "moving": rc.moving,
+                "speed": rc.speed,
+                "connected": arm.controller is rc,
+            },
+            "psu": {
+                "on": edm.is_on(),
+                "v": edm.get_voltage(),
+                "i": edm.get_current(),
+                "limit": edm.current_limit,
+                "max_limit": edm.max_current_limit,
+                "tripped": edm.overcurrent_tripped,
             },
         }
 
@@ -378,12 +468,17 @@ class DeviceController(QObject):
     # Параметры
     # ------------------------------------------------------------------
     def set_current_limit(self, v): self._request("set_current_limit", v)
-    def set_speed(self, v):         self._request("set_speed", v)
+    def set_speed(self, v):         self._request("set_arm_speed", v)
+    def set_arm_speed(self, v):     self._request("set_arm_speed", v)
     def move_to(self, x=None, z=None): self._request("move_to", x, z)
+    def move_tool(self, x=None, y=None, z=None): self._request("move_tool", x, y, z)
+    def move_joint(self, joint, angle): self._request("move_joint", joint, angle)
     def set_max_temp(self, v):      self._request("set_max_temp", v)
     def set_load_power(self, on):   self._request("set_load_power", on)
     def reset_motor(self):          self._request("reset_motor")
+    def home_arm(self):             self._request("home_arm")
     def stop_motor(self):           self._request("stop_motor")
+    def stop_arm(self):             self._request("stop_arm")
 
     def set_channel(self, channel: TransistorChannel, on: bool):
         self._request("set_channel", channel, on)
@@ -392,7 +487,7 @@ class DeviceController(QObject):
     def acdc_off(self): self._request("acdc_off")
 
     # ------------------------------------------------------------------
-    # Координатный стол (одна ось, отдельный контроллер)
+    # Ось Y руки (бывший координатный стол — оставлен для совместимости UI)
     # ------------------------------------------------------------------
     def move_table(self, pos):       self._request("move_table", pos)
     def set_table_speed(self, v):    self._request("set_table_speed", v)
@@ -400,10 +495,20 @@ class DeviceController(QObject):
     def stop_table(self):            self._request("stop_table")
 
     # ------------------------------------------------------------------
+    # Система подачи воды и крепление детали
+    # ------------------------------------------------------------------
+    def set_water(self, on):         self._request("set_water", on)
+    def set_drain(self, on):         self._request("set_drain", on)
+    def clamp_fixture(self, on):     self._request("clamp_fixture", on)
+
+    # ------------------------------------------------------------------
     # Программа обработки (плоский контур из DXF/SVG/PLT/HPGL)
     # ------------------------------------------------------------------
     def load_toolpath(self, points): self._request("load_toolpath", points)
     def clear_toolpath(self):        self._request("clear_toolpath")
+    def set_part_loaded(self, on):   self._request("set_part_loaded", on)
+    def set_machining_motion(self, xf=None, yf=None):
+        self._request("set_machining_motion", xf, yf)
 
     # ------------------------------------------------------------------
     # Лазерный излучатель (параметры с вкладки «Лазером»)
@@ -417,6 +522,8 @@ class DeviceController(QObject):
     def set_lid(self, closed):       self._request("set_lid", closed)
     def set_temperature(self, v):    self._request("set_temperature", v)
     def simulate_current(self, v):   self._request("simulate_current", v)
+    def simulate_water_flow(self, v):     self._request("simulate_water_flow", v)
+    def simulate_water_pressure(self, v): self._request("simulate_water_pressure", v)
 
     # ------------------------------------------------------------------
     # Мониторинг (вызывается периодически из QTimer в window.py)

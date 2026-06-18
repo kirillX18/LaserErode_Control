@@ -66,18 +66,25 @@ class GLMeshViewer(QOpenGLWidget):
         self._head = None           # (x, y) головки над полем
         self._WORK = 100.0          # сторона рабочего поля в координатах сцены
 
+        # машинная обработка (прошивка отверстия по ходу процесса)
+        self._overlay = None        # (tris, cols) — геометрия лунки или None
+        self._drill = None          # инструмент: dict {top, tip, phase, sparks}
+
     # ---- данные --------------------------------------------------------
     def load_file(self, path: str) -> None:
         self.set_mesh(load_mesh(path), os.path.basename(path))
 
-    def set_mesh(self, tris: list, name: str = "") -> None:
+    def set_mesh(self, tris: list, name: str = "", keep_view: bool = False) -> None:
+        """keep_view=True — сохранить камеру (горячая подмена меша на карвленый
+        во время процесса, ракурс на стенку не сбрасывается)."""
         self._toolpath = None
         self._head = None
         self._name = name
         self._ntris = len(tris)
         self._build_buffer(tris)
         self._recompute_bounds(tris)
-        self._reset_view()
+        if not keep_view:
+            self._reset_view()
         self._dirty = True
         self.update()
 
@@ -116,6 +123,8 @@ class GLMeshViewer(QOpenGLWidget):
         self._marker = None
         self._toolpath = None
         self._head = None
+        self._overlay = None
+        self._drill = None
         self.update()
 
     def mesh_info(self) -> dict:
@@ -123,6 +132,40 @@ class GLMeshViewer(QOpenGLWidget):
 
     def set_head_marker(self, x: float, y: float, on: bool) -> None:
         self._marker = (x, y) if on else None
+        self.update()
+
+    # ---- машинная обработка (прошивка отверстия) ----------------------
+    def set_overlay(self, tris: list, cols: list) -> None:
+        """Геометрия лунки: треугольники + цвет каждого (r,g,b в 0..1).
+        Рисуется немедленным режимом поверх детали с честным z-буфером."""
+        self._overlay = (tris or [], cols or []) if tris else None
+        self.update()
+
+    def clear_overlay(self) -> None:
+        self._overlay = None
+        self.update()
+
+    def set_drill_tool(self, top, tip, phase: str, sparks=()) -> None:
+        self._drill = {"top": top, "tip": tip,
+                       "phase": phase, "sparks": list(sparks)}
+        self.update()
+
+    def clear_drill(self) -> None:
+        self._drill = None
+        self.update()
+
+    def reset_view(self) -> None:
+        self._reset_view()
+        self.update()
+
+    def aim_at_normal(self, nx: float, ny: float, nz: float) -> None:
+        """Камера «лицом» к стенке с внешней нормалью (nx,ny,nz): для боковых
+        стенок почти горизонтально (анфас), для верхней грани — сверху."""
+        self._yaw = math.atan2(-nx, -ny) - math.radians(22)
+        pitch_deg = 82.0 - 30.0 * min(1.0, abs(nz))
+        self._pitch = max(0.05, min(math.pi - 0.05, math.radians(pitch_deg)))
+        self._zoom = 1.3
+        self._pan = [0.0, 0.0]
         self.update()
 
     # ---- подготовка геометрии -----------------------------------------
@@ -251,6 +294,10 @@ class GLMeshViewer(QOpenGLWidget):
             glDisableClientState(GL_VERTEX_ARRAY)
             glDisableClientState(GL_NORMAL_ARRAY)
 
+        # ── динамическая лунка (overlay) — освещается как деталь ──
+        if self._overlay is not None:
+            self._draw_overlay()
+
         # ── стол и оси рисуются без освещения ──
         glDisable(GL_LIGHTING)
         self._draw_grid()
@@ -258,7 +305,73 @@ class GLMeshViewer(QOpenGLWidget):
         self._draw_marker()
         self._draw_toolpath()
         self._draw_head()
+        self._draw_drill()
         glEnable(GL_LIGHTING)
+
+    def _draw_overlay(self):
+        """Стенки/дно/кольцо лунки немедленным режимом: на каждый треугольник
+        своя нормаль (для затенения) и свой цвет материала."""
+        from OpenGL.GL import (
+            glColorMaterial, glColor3f, glNormal3f, glBegin, glEnd, glVertex3f,
+            GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE, GL_TRIANGLES,
+        )
+        tris, cols = self._overlay
+        if not tris:
+            return
+        sqrt = math.sqrt
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        glBegin(GL_TRIANGLES)
+        for i in range(len(tris)):
+            a, b, c = tris[i]
+            ux = b[0] - a[0]; uy = b[1] - a[1]; uz = b[2] - a[2]
+            vx = c[0] - a[0]; vy = c[1] - a[1]; vz = c[2] - a[2]
+            nx = uy * vz - uz * vy
+            ny = uz * vx - ux * vz
+            nz = ux * vy - uy * vx
+            m = sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+            col = cols[i] if i < len(cols) else (0.7, 0.7, 0.75)
+            glColor3f(col[0], col[1], col[2])
+            glNormal3f(nx / m, ny / m, nz / m)
+            glVertex3f(a[0], a[1], a[2])
+            glVertex3f(b[0], b[1], b[2])
+            glVertex3f(c[0], c[1], c[2])
+        glEnd()
+
+    def _draw_drill(self):
+        """Луч лазера / электрод с искрами. Без z-теста — всегда поверх,
+        «входит» в открытое устье отверстия."""
+        d = self._drill
+        if not d:
+            return
+        from OpenGL.GL import (
+            glColor3f, glLineWidth, glPointSize, glBegin, glEnd, glVertex3f,
+            glEnable, glDisable, GL_LINES, GL_POINTS, GL_DEPTH_TEST,
+        )
+        top = d["top"]; tip = d["tip"]
+        if d["phase"] == "laser":
+            beam = (1.0, 0.31, 0.22); spot = (1.0, 0.92, 0.75)
+        else:
+            beam = (0.47, 0.80, 1.0); spot = (0.92, 0.96, 1.0)
+        glDisable(GL_DEPTH_TEST)
+        glColor3f(*beam); glLineWidth(2.6)
+        glBegin(GL_LINES)
+        glVertex3f(top[0], top[1], top[2])
+        glVertex3f(tip[0], tip[1], tip[2])
+        glEnd()
+        glLineWidth(1.0)
+        # пятно контакта
+        glColor3f(*spot); glPointSize(9.0)
+        glBegin(GL_POINTS); glVertex3f(tip[0], tip[1], tip[2]); glEnd()
+        # искры
+        sparks = d.get("sparks") or []
+        if sparks:
+            glColor3f(1.0, 0.84, 0.51); glPointSize(4.0)
+            glBegin(GL_POINTS)
+            for s in sparks:
+                glVertex3f(s[0], s[1], s[2])
+            glEnd()
+        glPointSize(1.0)
+        glEnable(GL_DEPTH_TEST)
 
     def _draw_grid(self):
         from OpenGL.GL import glColor3f, glBegin, glEnd, glVertex3f, GL_LINES

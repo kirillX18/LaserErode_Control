@@ -204,6 +204,13 @@ class MeshViewer(QWidget):
         # хук под «вариант 2»: маркер головки на столе
         self._marker = None            # (x, y) в координатах меша или None
 
+        # машинная обработка (прошивка отверстия по ходу процесса):
+        #   _overlay_tris/_cols — динамическая геометрия лунки (стенки/дно/кольцо)
+        #   _drill — инструмент над устьем: dict {top, tip, phase, sparks}
+        self._overlay_tris: list = []
+        self._overlay_cols: list = []
+        self._drill = None
+
         # программа обработки (контур) и положение головки над полем:
         #   _toolpath — список ломаных в мировых координатах (доли → поле);
         #   _head     — текущее положение головки (мировые X, Y) или None.
@@ -215,7 +222,9 @@ class MeshViewer(QWidget):
     def load_file(self, path: str) -> None:
         self.set_mesh(load_mesh(path), os.path.basename(path))
 
-    def set_mesh(self, tris: list, name: str = "") -> None:
+    def set_mesh(self, tris: list, name: str = "", keep_view: bool = False) -> None:
+        """keep_view=True — не сбрасывать камеру (для «горячей» подмены меша
+        на карвленый во время процесса: ракурс на стенку сохраняется)."""
         self._toolpath = None
         self._head = None
         if len(tris) > _MAX_TRIS:                       # равномерное прореживание
@@ -230,7 +239,8 @@ class MeshViewer(QWidget):
             self._fast = tris
         self._name = name
         self._recompute_bounds()
-        self._reset_view()
+        if not keep_view:
+            self._reset_view()
         self.update()
 
     def set_toolpath(self, segments, name: str = "") -> None:
@@ -267,6 +277,9 @@ class MeshViewer(QWidget):
         self._marker = None
         self._toolpath = None
         self._head = None
+        self._overlay_tris = []
+        self._overlay_cols = []
+        self._drill = None
         self.update()
 
     def mesh_info(self) -> dict:
@@ -275,6 +288,47 @@ class MeshViewer(QWidget):
     def set_head_marker(self, x: float, y: float, on: bool) -> None:
         """Хук «варианта 2»: положение головки над столом (в коорд. меша)."""
         self._marker = (x, y) if on else None
+        self.update()
+
+    # ---- машинная обработка (прошивка отверстия) ----------------------
+    def set_overlay(self, tris: list, cols: list) -> None:
+        """Динамическая геометрия лунки: треугольники + цвет каждого (r,g,b
+        в 0..1). Рисуется поверх детали с той же сортировкой по глубине."""
+        self._overlay_tris = tris or []
+        self._overlay_cols = cols or []
+        self.update()
+
+    def clear_overlay(self) -> None:
+        self._overlay_tris = []
+        self._overlay_cols = []
+        self.update()
+
+    def set_drill_tool(self, top, tip, phase: str, sparks=()) -> None:
+        """Инструмент над устьем: top/tip — мировые точки луча (лазер) или
+        электрода (эрозия); sparks — точки искр у дна."""
+        self._drill = {"top": top, "tip": tip,
+                       "phase": phase, "sparks": list(sparks)}
+        self.update()
+
+    def clear_drill(self) -> None:
+        self._drill = None
+        self.update()
+
+    def reset_view(self) -> None:
+        """Публичный сброс камеры (для возврата ракурса после процесса)."""
+        self._reset_view()
+        self.update()
+
+    def aim_at_normal(self, nx: float, ny: float, nz: float) -> None:
+        """Развернуть камеру «лицом» к стенке с внешней нормалью (nx,ny,nz)
+        — чтобы устье отверстия смотрело на зрителя. Для вертикальных стенок
+        камера почти горизонтальна (стенка видна анфас), для верхней грани —
+        наклонена сверху. Лёгкий доворот по азимуту даёт объём лунке."""
+        self._yaw = math.atan2(-nx, -ny) - math.radians(22)
+        pitch_deg = 82.0 - 30.0 * min(1.0, abs(nz))
+        self._pitch = max(0.05, min(math.pi - 0.05, math.radians(pitch_deg)))
+        self._zoom = 1.3
+        self._pan = QPointF(0, 0)
         self.update()
 
     # ---- геометрия сцены ----------------------------------------------
@@ -380,6 +434,7 @@ class MeshViewer(QWidget):
         if self._tris:
             self._draw_mesh(qp)
             self._draw_marker(qp)
+            self._draw_drill(qp)
         elif self._toolpath is not None:
             self._draw_toolpath(qp)
             self._draw_head(qp)
@@ -455,19 +510,104 @@ class MeshViewer(QWidget):
 
             depth = (ad + bd + cd)        # без /3 — для сортировки не важно
             shade = abs(nx * lx + ny * ly + nz * lz)
-            faces.append((depth, shade, sax, say, sbx, sby, scx, scy))
+            faces.append((depth, shade, sax, say, sbx, sby, scx, scy, None))
+
+        # --- динамическая геометрия лунки (overlay) с собственными цветами ---
+        # набор маленький (~300 граней), считаем всегда полностью; сортируется
+        # вместе с деталью по той же глубине (единый алгоритм художника).
+        ov = self._overlay_tris
+        if ov:
+            ocols = self._overlay_cols
+            for ti in range(len(ov)):
+                a, b, c = ov[ti]
+                ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+                vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+                nx = uy * vz - uz * vy
+                ny = uz * vx - ux * vz
+                nz = ux * vy - uy * vx
+                nm = sqrt(nx * nx + ny * ny + nz * nz) or 1.0
+                nx /= nm; ny /= nm; nz /= nm
+
+                ax, ay, az = a[0] - cx0, a[1] - cy0, a[2] - cz0
+                bx, by, bz = b[0] - cx0, b[1] - cy0, b[2] - cz0
+                cx_, cy_, cz_ = c[0] - cx0, c[1] - cy0, c[2] - cz0
+
+                ax1 = ax * c_y - ay * s_y; ay1 = ax * s_y + ay * c_y
+                bx1 = bx * c_y - by * s_y; by1 = bx * s_y + by * c_y
+                cx1 = cx_ * c_y - cy_ * s_y; cy1 = cx_ * s_y + cy_ * c_y
+
+                ad = ay1 * c_p - az * s_p; az2 = ay1 * s_p + az * c_p
+                bd = by1 * c_p - bz * s_p; bz2 = by1 * s_p + bz * c_p
+                cd = cy1 * c_p - cz_ * s_p; cz2 = cy1 * s_p + cz_ * c_p
+
+                sax = ox + ax1 * scale; say = oy - az2 * scale
+                sbx = ox + bx1 * scale; sby = oy - bz2 * scale
+                scx = ox + cx1 * scale; scy = oy - cz2 * scale
+
+                depth = (ad + bd + cd)
+                shade = abs(nx * lx + ny * ly + nz * lz)
+                col = ocols[ti] if ti < len(ocols) else (0.7, 0.7, 0.75)
+                # лёгкий «подъём» к зрителю, чтобы лунка не конкурировала по
+                # глубине со стенкой детали на одном уровне (без z-буфера).
+                faces.append((depth - self._extent * 0.012, shade,
+                              sax, say, sbx, sby, scx, scy, col))
 
         # алгоритм художника: дальние (большая глубина) — первыми
         faces.sort(key=lambda f: f[0], reverse=True)
 
         edge = self._interacting        # при интерактиве не рисуем контур граней
-        for _, shade, sax, say, sbx, sby, scx, scy in faces:
-            k = 0.30 + 0.70 * shade
-            col = QColor(int(70 + 150 * k), int(95 + 150 * k), int(120 + 135 * k))
-            qp.setBrush(col)
-            qp.setPen(Qt.NoPen if edge else QPen(col.darker(140), 1))
+        for f in faces:
+            shade = f[1]
+            sax, say, sbx, sby, scx, scy = f[2], f[3], f[4], f[5], f[6], f[7]
+            col = f[8]
+            if col is None:                    # сталь детали — штатное затенение
+                k = 0.30 + 0.70 * shade
+                qc = QColor(int(70 + 150 * k), int(95 + 150 * k),
+                            int(120 + 135 * k))
+                qp.setBrush(qc)
+                qp.setPen(Qt.NoPen if edge else QPen(qc.darker(140), 1))
+            else:                              # материал лунки — заданный цвет
+                k = 0.55 + 0.45 * shade
+                qc = QColor(max(0, min(255, int(col[0] * 255 * k))),
+                            max(0, min(255, int(col[1] * 255 * k))),
+                            max(0, min(255, int(col[2] * 255 * k))))
+                qp.setBrush(qc)
+                qp.setPen(Qt.NoPen)
             qp.drawPolygon(QPolygonF([QPointF(sax, say), QPointF(sbx, sby),
                                       QPointF(scx, scy)]))
+
+    def _draw_drill(self, qp: QPainter) -> None:
+        """Инструмент в устье: луч лазера (фаза 1) или электрод с искрами
+        (фаза 2). Рисуется поверх детали — «входит» в открытое устье."""
+        d = self._drill
+        if not d:
+            return
+        top, _ = self._project(d["top"])
+        tip, _ = self._project(d["tip"])
+        if d["phase"] == "laser":
+            beam = QColor(255, 80, 55)
+            glow = QColor(255, 120, 60, 140)
+            core = QColor(255, 235, 190)
+        else:
+            beam = QColor(120, 205, 255)
+            glow = QColor(150, 220, 255, 130)
+            core = QColor(235, 245, 255)
+        # луч/электрод
+        qp.setPen(QPen(beam, 2.6))
+        qp.drawLine(top, tip)
+        # ореол и ядро пятна контакта на дне
+        qp.setPen(Qt.NoPen)
+        qp.setBrush(QBrush(glow))
+        qp.drawEllipse(tip, 8, 8)
+        qp.setBrush(QBrush(core))
+        qp.drawEllipse(tip, 3, 3)
+        # искры (только эрозия)
+        sparks = d.get("sparks") or []
+        if sparks:
+            qp.setBrush(QBrush(QColor(255, 215, 130)))
+            for s in sparks:
+                p, _ = self._project(s)
+                qp.drawEllipse(p, 1.7, 1.7)
 
     def _draw_marker(self, qp: QPainter) -> None:
         if self._marker is None:

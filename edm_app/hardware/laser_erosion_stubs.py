@@ -6,19 +6,31 @@
     HardwareRegistry       — владеет всеми устройствами, ничего не решает
     ProcessController      — бизнес-логика (старт/стоп/авария/мониторинг)
     TestHarness            — мок-методы для имитации физических событий
-                             (открытие крышки, нагрев и т.п.) — НЕ часть прошивки
+                             (открытие крышки, нагрев, ток, давление воды) —
+                             НЕ часть прошивки
 
-Состав оборудования (после перехода на лазерную эрозию):
+Состав оборудования (после перехода на роботизированную лазерно-эрозионную
+обработку):
     AC/DC преобразователь            — питание логики 24 В;
-    Блок транзисторных ключей        — коммутация силовых нагрузок (48 В);
-    Источник напряжения 48 В         — силовое питание лазера и подачи стола;
-    Лазерный излучатель              — рабочий инструмент (параметры с вкладки
-                                       «Лазером»): мощность, частота, фокус,
-                                       длительность импульса, время воздействия,
-                                       режим излучения;
-    Шаговый двигатель + драйвер      — позиционирование головки по двум осям X/Z;
-    Координатный стол + контроллер   — подача заготовки по одной оси;
-    Датчик крышки, датчик температуры.
+    Блок транзисторных ключей        — коммутация силовых нагрузок:
+                                       приводы руки, лазер, эрозия, подача воды;
+    Источник питания эрозии          — напряжение на катод/анод, защита от
+                                       перегрузки по току;
+    Источник питания лазера          — питание лазерного излучателя, включается
+                                       только при закрытой крышке и готовности;
+    Роботизированная 8-суставная рука — позиционирование рабочей головки
+                                       (заменяет шаговые приводы и стол);
+    Контроллер 8-суставного робота   — движение суставов J1…J8 и траектория;
+    Лазерно-эрозионная рабочая головка — узел из:
+        лазерный излучатель          — параметры с вкладки «Лазером»;
+        эрозионный катод             — электроэрозионное воздействие;
+        эрозионный анод              — работает с катодом и источником эрозии;
+        сопло подачи воды            — вода из системы подачи в рабочую зону;
+    Система подачи воды              — насос, клапан, датчики давления/расхода,
+                                       слив (заменяет полировочную ванну);
+    Крепление детали (рабочий стол)  — неподвижное основание под заготовку;
+    Датчик температуры               — нагрев лазера, электродов, рабочей зоны;
+    Датчик закрытия защитной крышки  — лазер и эрозия не пускаются при открытой.
 
 Все сообщения идут через logger "hardware" — UI подписывается на этот логгер
 и показывает сообщения в своём окне.
@@ -40,10 +52,11 @@ logger = logging.getLogger("hardware")
 # ============================================================
 
 class TransistorChannel(str, Enum):
-    """Каналы блока транзисторных ключей (силовые нагрузки 48 В)."""
-    TABLE_FEED = "table_feed"     # питание привода подачи координатного стола
-    POWER_48V  = "power_48v"      # разрешение питания источника 48 В
-    LASER      = "laser"          # подача 48 В на лазерный излучатель
+    """Каналы блока транзисторных ключей (силовые нагрузки)."""
+    ARM_DRIVES = "arm_drives"   # питание приводов суставов роботизированной руки
+    EDM        = "edm"          # разрешение источника эрозии (катод/анод)
+    LASER      = "laser"        # подача питания на лазерный излучатель
+    WATER      = "water"        # питание насоса/клапана подачи воды
 
 
 class LaserMode(str, Enum):
@@ -110,6 +123,9 @@ class TransistorSwitchBlockStub:
     Блок транзисторных ключей.
     Транзистор открыт, когда: есть общая земля И на затвор подан управляющий сигнал.
     Питание на нагрузку идёт, когда: транзистор открыт И есть силовое питание.
+
+    Коммутирует силовые нагрузки лазерно-эрозионного робота:
+        приводы суставов руки, лазер, эрозионный процесс, подача воды.
     """
 
     def __init__(self):
@@ -117,17 +133,21 @@ class TransistorSwitchBlockStub:
         self.common_ground = True
         self.load_power_enabled = False
         self.channels: dict[TransistorChannel, dict] = {
-            TransistorChannel.TABLE_FEED: {
+            TransistorChannel.ARM_DRIVES: {
                 "control_signal": 0, "transistor_open": False, "load_enabled": False,
-                "description": "Питание привода подачи стола",
+                "description": "Питание приводов суставов руки",
             },
-            TransistorChannel.POWER_48V: {
+            TransistorChannel.EDM: {
                 "control_signal": 0, "transistor_open": False, "load_enabled": False,
-                "description": "Разрешение питания источника 48 В",
+                "description": "Разрешение источника эрозии (катод/анод)",
             },
             TransistorChannel.LASER: {
                 "control_signal": 0, "transistor_open": False, "load_enabled": False,
-                "description": "Подача 48 В на лазерный излучатель",
+                "description": "Подача питания на лазерный излучатель",
+            },
+            TransistorChannel.WATER: {
+                "control_signal": 0, "transistor_open": False, "load_enabled": False,
+                "description": "Питание насоса и клапана подачи воды",
             },
         }
 
@@ -199,15 +219,22 @@ class TransistorSwitchBlockStub:
 
 
 # ============================================================
-# Источник напряжения 48 В
+# Источник питания эрозионного процесса
 # ============================================================
 
-class PowerSupply48VStub:
+class EdmPowerSupplyStub:
+    """
+    Источник питания эрозионного процесса.
+    Подаёт напряжение на эрозионный катод и анод, имеет защиту от перегрузки
+    по току (отключается при превышении лимита). Включается только при наличии
+    разрешения через транзисторный ключ EDM.
+    """
 
-    def __init__(self, current_limit: float = 5.0, max_current_limit: float = 10.0):
-        self.name = "Источник напряжения 48 В"
+    def __init__(self, voltage: float = 80.0,
+                 current_limit: float = 5.0, max_current_limit: float = 10.0):
+        self.name = "Источник питания эрозии"
         self.powered_on = False
-        self.voltage = 48.0
+        self.voltage = float(voltage)
         self.current = 0.0
         self.current_limit = current_limit
         self.max_current_limit = max_current_limit
@@ -236,14 +263,12 @@ class PowerSupply48VStub:
         return self.voltage if self.powered_on else 0.0
 
     def get_current(self) -> float:
-        """Чистый геттер — никаких побочных эффектов."""
         return self.current if self.powered_on else 0.0
 
     def check_overcurrent(self) -> bool:
         """
         Проверка перегрузки. Если ток превышен — выключает источник
-        и поднимает флаг аварии. Вызывается из мониторинга процесса.
-        Возвращает True, если перегрузки нет.
+        и поднимает флаг аварии. Возвращает True, если перегрузки нет.
         """
         if not self.powered_on:
             return True
@@ -279,12 +304,63 @@ class PowerSupply48VStub:
 
     def get_status(self) -> str:
         if self.powered_on:
-            return (f"Источник 48 В: {self.voltage} В, "
+            return (f"Источник эрозии: {self.voltage} В, "
                     f"ток {self.current} А, лимит {self.current_limit} А")
-        return f"Источник 48 В выключен. Лимит: {self.current_limit} А"
+        return f"Источник эрозии выключен. Лимит: {self.current_limit} А"
 
     def __repr__(self) -> str:
-        return f"<PSU48V on={self.powered_on} V={self.voltage} I={self.current}>"
+        return f"<EdmPSU on={self.powered_on} V={self.voltage} I={self.current}>"
+
+
+# ============================================================
+# Источник питания лазера
+# ============================================================
+
+class LaserPowerSupplyStub:
+    """
+    Источник питания лазерного излучателя.
+    Включается ТОЛЬКО при закрытой защитной зоне (крышке) и готовности системы.
+    Питание разрешается через транзисторный ключ LASER.
+    """
+
+    def __init__(self, voltage: float = 48.0):
+        self.name = "Источник питания лазера"
+        self.powered_on = False
+        self.voltage = float(voltage)
+
+    def turn_on(self, power_allowed: bool, lid_closed: bool,
+                system_ready: bool) -> bool:
+        if not power_allowed:
+            logger.error(f"{self.name}: питание через транзисторный ключ не разрешено")
+            return False
+        if not lid_closed:
+            logger.error(f"{self.name}: защитная крышка открыта — питание запрещено")
+            return False
+        if not system_ready:
+            logger.error(f"{self.name}: система не готова — питание запрещено")
+            return False
+        self.powered_on = True
+        logger.info(f"{self.name}: включен, {self.voltage} В")
+        return True
+
+    def turn_off(self) -> bool:
+        self.powered_on = False
+        logger.info(f"{self.name}: выключен")
+        return True
+
+    def is_on(self) -> bool:
+        return self.powered_on
+
+    def get_voltage(self) -> float:
+        return self.voltage if self.powered_on else 0.0
+
+    def get_status(self) -> str:
+        if self.powered_on:
+            return f"Источник лазера включен, {self.voltage} В"
+        return "Источник лазера выключен"
+
+    def __repr__(self) -> str:
+        return f"<LaserPSU on={self.powered_on} V={self.voltage}>"
 
 
 # ============================================================
@@ -317,230 +393,24 @@ class LidSensorStub:
 
 
 # ============================================================
-# Драйвер шагового двигателя (две оси X/Z)
+# Контроллер 8-суставного робота
 # ============================================================
 
-class StepperMotorDriverStub:
-
-    def __init__(self):
-        self.name = "Драйвер шагового двигателя"
-        self.enabled = False
-        self.moving = False
-        self.speed = 100
-        self.direction = 0
-
-    def enable(self, power_available: bool = True) -> bool:
-        if not power_available:
-            logger.error(f"{self.name}: нет питания от AC/DC преобразователя")
-            return False
-        self.enabled = True
-        logger.info(f"{self.name}: включен")
-        return True
-
-    def disable(self) -> bool:
-        self.stop()
-        self.enabled = False
-        logger.info(f"{self.name}: выключен")
-        return True
-
-    def set_speed(self, value: int) -> bool:
-        if value <= 0:
-            logger.error(f"{self.name}: скорость должна быть > 0")
-            return False
-        self.speed = int(value)
-        logger.info(f"{self.name}: скорость {self.speed} шаг/с")
-        return True
-
-    def start_motion(self, direction: int) -> bool:
-        if not self.enabled:
-            logger.error(f"{self.name}: драйвер выключен")
-            return False
-        if direction not in (-1, 1):
-            logger.error(f"{self.name}: направление должно быть 1 или -1")
-            return False
-        self.direction = direction
-        self.moving = True
-        logger.info(f"{self.name}: движение "
-                    f"{'вперёд' if direction == 1 else 'назад'}")
-        return True
-
-    def stop(self) -> bool:
-        self.moving = False
-        self.direction = 0
-        return True
-
-    def get_status(self) -> str:
-        if not self.enabled:
-            return f"Драйвер выключен. Скорость: {self.speed} шаг/с"
-        if self.moving:
-            return f"Драйвер: движение, скорость {self.speed} шаг/с"
-        return f"Драйвер включен, мотор остановлен. Скорость: {self.speed} шаг/с"
-
-    def __repr__(self) -> str:
-        return f"<StepperDriver enabled={self.enabled} moving={self.moving}>"
-
-
-# ============================================================
-# Шаговый двигатель — позиционирование головки по двум осям X/Z
-# ============================================================
-
-class StepperMotorStub:
+class RobotControllerStub:
     """
-    Двухосевой шаговый двигатель (оси X и Z) позиционирования лазерной головки.
-    Головка перемещается в горизонтали (X) и по высоте (Z); подача заготовки по
-    оси Y выполняется отдельно координатным столом.
-    Движение может быть:
-      - мгновенным (по умолчанию) — для unit-тестов;
-      - симулированным в фоне (set_async_motion) — для UI, чтобы не блокировать.
-    Обе оси перемещаются в одном фоновом ходе; время хода — по длинной оси.
-    """
-
-    AXES = ("x", "z")
-
-    def __init__(self, max_position: int = 1000, min_position: int = 0):
-        self.name = "Шаговый двигатель (X/Z)"
-        self.driver: Optional[StepperMotorDriverStub] = None
-        self.moving = False
-        self.pos: dict[str, int] = {"x": 0, "z": 0}
-        self.max_position = max_position
-        self.min_position = min_position
-        self.async_motion = False
-        self.motion_delay_scale = 0.001
-        self._motion_thread: Optional[threading.Thread] = None
-        self._stop_motion = threading.Event()
-
-    def attach_driver(self, driver: StepperMotorDriverStub) -> bool:
-        self.driver = driver
-        logger.info(f"{self.name}: драйвер назначен")
-        return True
-
-    def set_async_motion(self, enabled: bool, scale: float = 0.001) -> bool:
-        """Если True, движение происходит в фоне и не блокирует вызывающий поток."""
-        self.async_motion = bool(enabled)
-        self.motion_delay_scale = max(0.0, float(scale))
-        return True
-
-    def _can_move(self) -> bool:
-        if self.driver is None:
-            logger.error(f"{self.name}: драйвер не назначен")
-            return False
-        if not self.driver.enabled:
-            logger.error(f"{self.name}: драйвер выключен")
-            return False
-        return True
-
-    def _in_range(self, value: int) -> bool:
-        return self.min_position <= value <= self.max_position
-
-    def move_to(self, x: Optional[int] = None, z: Optional[int] = None) -> bool:
-        """Переместить головку в точку (X, Z). None по оси — оставить как есть."""
-        if not self._can_move():
-            return False
-        tx = self.pos["x"] if x is None else int(x)
-        tz = self.pos["z"] if z is None else int(z)
-        for axis, val in (("X", tx), ("Z", tz)):
-            if not self._in_range(val):
-                logger.error(f"{self.name}: позиция {axis}={val} вне диапазона "
-                             f"[{self.min_position}, {self.max_position}]")
-                return False
-
-        dx, dz = tx - self.pos["x"], tz - self.pos["z"]
-        if dx == 0 and dz == 0:
-            return True
-
-        direction = 1 if (dx if dx != 0 else dz) > 0 else -1
-        if not self.driver.start_motion(direction):
-            return False
-
-        self.moving = True
-        steps = max(abs(dx), abs(dz))
-        logger.info(f"{self.name}: перемещение в X={tx}, Z={tz}")
-
-        if self.async_motion:
-            self._start_async_motion(tx, tz, steps)
-        else:
-            self._finish_motion(tx, tz)
-        return True
-
-    def move_axis(self, axis: str, position: int) -> bool:
-        """Переместить одну ось ('x' или 'z') в заданную позицию."""
-        axis = axis.lower()
-        if axis not in self.AXES:
-            logger.error(f"{self.name}: ось '{axis}' не существует")
-            return False
-        return self.move_to(**{axis: int(position)})
-
-    def _finish_motion(self, tx: int, tz: int) -> None:
-        self.pos["x"], self.pos["z"] = tx, tz
-        self.moving = False
-        if self.driver:
-            self.driver.stop()
-        logger.info(f"{self.name}: позиция X={tx}, Z={tz}")
-
-    def _start_async_motion(self, tx: int, tz: int, steps_count: int) -> None:
-        self._stop_motion.clear()
-
-        def worker():
-            delay = (steps_count / max(self.driver.speed, 1)
-                     * self.motion_delay_scale)
-            if self._stop_motion.wait(timeout=delay):
-                logger.info(f"{self.name}: движение прервано")
-                self.moving = False
-                if self.driver:
-                    self.driver.stop()
-            else:
-                self._finish_motion(tx, tz)
-
-        self._motion_thread = threading.Thread(target=worker, daemon=True)
-        self._motion_thread.start()
-
-    def stop(self) -> bool:
-        self._stop_motion.set()
-        if self._motion_thread and self._motion_thread.is_alive():
-            self._motion_thread.join(timeout=1.0)
-        self.moving = False
-        if self.driver:
-            self.driver.stop()
-        return True
-
-    def get_position(self) -> dict:
-        return dict(self.pos)
-
-    def reset_position(self) -> bool:
-        if self.moving:
-            logger.error(f"{self.name}: нельзя сбросить позицию во время движения")
-            return False
-        self.pos["x"] = self.pos["z"] = 0
-        return True
-
-    def get_status(self) -> str:
-        if self.driver is None:
-            return "Шаговый двигатель: драйвер не назначен"
-        state = "движется" if self.moving else "остановлен"
-        return f"Шаговый двигатель {state}, позиция X={self.pos['x']}, Z={self.pos['z']}"
-
-    def __repr__(self) -> str:
-        return f"<StepperMotor x={self.pos['x']} z={self.pos['z']} moving={self.moving}>"
-
-
-# ============================================================
-# Контроллер координатного стола
-# ============================================================
-
-class TableControllerStub:
-    """
-    Контроллер координатного стола (одна ось подачи).
-    Управляет приводом подачи: выходит на связь (online) по логическому питанию,
-    разрешает движение (enabled) при наличии питания, задаёт скорость и
-    направление. Аналог драйвера ШД, но для отдельного привода подачи стола.
+    Контроллер 8-суставного робота.
+    Заменяет управление шаговым приводом. Выходит на связь (online) по
+    логическому питанию, разрешает движение суставов (enabled) при наличии
+    питания приводов, задаёт скорость отработки траектории. Отвечает за
+    выполнение движения суставов J1–J8 и прохождение траектории обработки.
     """
 
     def __init__(self):
-        self.name = "Контроллер стола"
+        self.name = "Контроллер робота"
         self.online = False        # есть ли связь с контроллером
-        self.enabled = False       # разрешено ли движение
+        self.enabled = False       # разрешено ли движение суставов
         self.moving = False
-        self.speed = 100
+        self.speed = 100           # темп отработки траектории, усл. ед.
         self.direction = 0
 
     def connect(self) -> bool:
@@ -559,10 +429,10 @@ class TableControllerStub:
             logger.error(f"{self.name}: нет связи с контроллером")
             return False
         if not power_available:
-            logger.error(f"{self.name}: нет питания")
+            logger.error(f"{self.name}: нет питания приводов")
             return False
         self.enabled = True
-        logger.info(f"{self.name}: движение разрешено")
+        logger.info(f"{self.name}: движение суставов разрешено")
         return True
 
     def disable(self) -> bool:
@@ -575,7 +445,7 @@ class TableControllerStub:
             logger.error(f"{self.name}: скорость должна быть > 0")
             return False
         self.speed = int(value)
-        logger.info(f"{self.name}: скорость {self.speed} шаг/с")
+        logger.info(f"{self.name}: темп траектории {self.speed}")
         return True
 
     def start_motion(self, direction: int) -> bool:
@@ -596,42 +466,69 @@ class TableControllerStub:
 
     def get_status(self) -> str:
         if not self.online:
-            return "Контроллер стола: нет связи"
+            return "Контроллер робота: нет связи"
         if not self.enabled:
-            return f"Контроллер стола: на связи, движение запрещено. Скорость: {self.speed} шаг/с"
+            return f"Контроллер робота: на связи, движение запрещено. Темп: {self.speed}"
         if self.moving:
-            return f"Контроллер стола: движение, скорость {self.speed} шаг/с"
-        return f"Контроллер стола: готов, скорость {self.speed} шаг/с"
+            return f"Контроллер робота: отработка траектории, темп {self.speed}"
+        return f"Контроллер робота: готов, темп {self.speed}"
 
     def __repr__(self) -> str:
-        return f"<TableController online={self.online} enabled={self.enabled}>"
+        return f"<RobotController online={self.online} enabled={self.enabled}>"
 
 
 # ============================================================
-# Координатный стол — подача заготовки по одной оси
+# Роботизированная 8-суставная рука
 # ============================================================
 
-class PositioningTableStub:
+class RoboticArmStub:
     """
-    Координатный стол подачи заготовки по оси Y. Движется по ОДНОЙ оси,
-    перемещением управляет отдельный контроллер (TableControllerStub).
-    Движение может быть мгновенным (unit-тесты) или фоновым (set_async_motion) —
-    чтобы не блокировать UI.
+    Роботизированная рука с 8 суставами (J1…J8). Заменяет шаговые приводы и
+    координатный стол: позиционирование рабочей головки по трём осям рабочей
+    зоны (X, Y, Z) выполняется рукой.
+
+    Каждый сустав имеет привод, датчик положения (текущий угол) и ограничение
+    угла поворота (min/max). Движением суставов и отработкой траектории
+    управляет RobotControllerStub.
+
+    Положение инструмента (TCP) — авторитетные декартовы координаты рабочей
+    зоны; углы суставов в этой модели рассчитываются детерминированно по
+    положению инструмента (упрощённая обратная задача), остаются в пределах
+    ограничений и служат для отображения позы руки.
+
+    Движение может быть мгновенным (unit-тесты) или фоновым (set_async_motion).
     """
 
-    def __init__(self, max_position: int = 500, min_position: int = 0):
-        self.name = "Координатный стол (ось Y)"
-        self.controller: Optional[TableControllerStub] = None
+    # Имена суставов и их угловые ограничения (градусы)
+    JOINT_LIMITS = {
+        "J1": (-180, 180),   # поворот основания
+        "J2": (-90, 90),     # плечо
+        "J3": (-150, 150),   # локоть
+        "J4": (-180, 180),   # предплечье
+        "J5": (-120, 120),   # кисть (наклон)
+        "J6": (-180, 180),   # кисть (поворот)
+        "J7": (-120, 120),   # инструмент (наклон)
+        "J8": (-360, 360),   # инструмент (вращение)
+    }
+    JOINTS = tuple(JOINT_LIMITS.keys())
+    AXES = ("x", "y", "z")
+
+    def __init__(self,
+                 x_range=(0, 1000), y_range=(0, 500), z_range=(0, 400)):
+        self.name = "8-суставная рука"
+        self.controller: Optional[RobotControllerStub] = None
         self.moving = False
-        self.position = 0
-        self.max_position = max_position
-        self.min_position = min_position
+        self.tool = {"x": 0, "y": 0, "z": 0}
+        self.ranges = {"x": tuple(x_range), "y": tuple(y_range), "z": tuple(z_range)}
+        self.joints = {j: 0.0 for j in self.JOINTS}
         self.async_motion = False
         self.motion_delay_scale = 0.001
         self._motion_thread: Optional[threading.Thread] = None
         self._stop_motion = threading.Event()
+        self._sync_joints()
 
-    def attach_controller(self, controller: TableControllerStub) -> bool:
+    # ---- связь с контроллером ----
+    def attach_controller(self, controller: RobotControllerStub) -> bool:
         self.controller = controller
         logger.info(f"{self.name}: контроллер назначен")
         return True
@@ -650,54 +547,97 @@ class PositioningTableStub:
             return False
         return True
 
-    def move_to_position(self, position: int) -> bool:
-        position = int(position)
-        if not self.min_position <= position <= self.max_position:
-            logger.error(f"{self.name}: позиция {position} вне диапазона "
-                         f"[{self.min_position}, {self.max_position}]")
-            return False
-        return self.move_steps(position - self.position)
+    def _in_range(self, axis: str, value: float) -> bool:
+        lo, hi = self.ranges[axis]
+        return lo <= value <= hi
 
-    def move_steps(self, steps: int) -> bool:
+    # ---- кинематика (упрощённая обратная задача для отображения позы) ----
+    def _sync_joints(self) -> None:
+        """Пересчитать углы суставов по текущему положению инструмента."""
+        for i, j in enumerate(self.JOINTS):
+            lo, hi = self.JOINT_LIMITS[j]
+            ax = self.AXES[i % 3]
+            rlo, rhi = self.ranges[ax]
+            span = (rhi - rlo) or 1
+            frac = (self.tool[ax] - rlo) / span          # 0..1
+            # фаза, чтобы суставы расходились по-разному, но в пределах лимитов
+            phase = (i + 1) / (len(self.JOINTS) + 1)
+            angle = (lo + hi) / 2 + (hi - lo) / 2 * math.sin(2 * math.pi * (frac + phase))
+            self.joints[j] = round(max(lo, min(hi, angle)), 1)
+
+    # ---- движение инструмента (TCP) ----
+    def move_tool(self, x: Optional[float] = None, y: Optional[float] = None,
+                  z: Optional[float] = None) -> bool:
+        """Переместить инструмент в точку (X, Y, Z). None по оси — оставить как есть."""
         if not self._can_move():
             return False
-        steps = int(steps)
-        if steps == 0:
+        target = {
+            "x": self.tool["x"] if x is None else float(x),
+            "y": self.tool["y"] if y is None else float(y),
+            "z": self.tool["z"] if z is None else float(z),
+        }
+        for ax in self.AXES:
+            if not self._in_range(ax, target[ax]):
+                lo, hi = self.ranges[ax]
+                logger.error(f"{self.name}: {ax.upper()}={target[ax]} вне диапазона "
+                             f"[{lo}, {hi}]")
+                return False
+
+        dist = math.dist(
+            (self.tool["x"], self.tool["y"], self.tool["z"]),
+            (target["x"], target["y"], target["z"]),
+        )
+        if dist == 0:
             return True
 
-        new_position = self.position + steps
-        if not self.min_position <= new_position <= self.max_position:
-            logger.error(f"{self.name}: целевая позиция вне диапазона")
-            return False
-
-        direction = 1 if steps > 0 else -1
-        if not self.controller.start_motion(direction):
+        if not self.controller.start_motion(1):
             return False
 
         self.moving = True
-        logger.info(f"{self.name}: подача на {steps} шагов")
+        logger.info(f"{self.name}: перемещение инструмента в "
+                    f"X={target['x']:.0f}, Y={target['y']:.0f}, Z={target['z']:.0f}")
 
         if self.async_motion:
-            self._start_async_motion(new_position, abs(steps))
+            self._start_async_motion(target, dist)
         else:
-            self._finish_motion(new_position)
+            self._finish_motion(target)
         return True
 
-    def _finish_motion(self, target: int) -> None:
-        self.position = target
+    def move_joint(self, joint: str, angle: float) -> bool:
+        """Повернуть отдельный сустав J1…J8 в заданный угол (наладка)."""
+        joint = joint.upper()
+        if joint not in self.JOINT_LIMITS:
+            logger.error(f"{self.name}: сустав '{joint}' не существует")
+            return False
+        if not self._can_move():
+            return False
+        lo, hi = self.JOINT_LIMITS[joint]
+        angle = float(angle)
+        if not lo <= angle <= hi:
+            logger.error(f"{self.name}: угол {joint}={angle}° вне диапазона "
+                         f"[{lo}, {hi}]")
+            return False
+        self.joints[joint] = round(angle, 1)
+        logger.info(f"{self.name}: {joint} = {self.joints[joint]}°")
+        return True
+
+    def _finish_motion(self, target: dict) -> None:
+        self.tool = dict(target)
+        self._sync_joints()
         self.moving = False
         if self.controller:
             self.controller.stop()
-        logger.info(f"{self.name}: позиция {self.position}")
+        logger.info(f"{self.name}: позиция инструмента "
+                    f"X={self.tool['x']:.0f}, Y={self.tool['y']:.0f}, "
+                    f"Z={self.tool['z']:.0f}")
 
-    def _start_async_motion(self, target: int, steps_count: int) -> None:
+    def _start_async_motion(self, target: dict, dist: float) -> None:
         self._stop_motion.clear()
 
         def worker():
-            delay = (steps_count / max(self.controller.speed, 1)
-                     * self.motion_delay_scale)
+            delay = dist / max(self.controller.speed, 1) * self.motion_delay_scale
             if self._stop_motion.wait(timeout=delay):
-                logger.info(f"{self.name}: подача прервана")
+                logger.info(f"{self.name}: движение прервано")
                 self.moving = False
                 if self.controller:
                     self.controller.stop()
@@ -716,22 +656,104 @@ class PositioningTableStub:
             self.controller.stop()
         return True
 
-    def get_position(self) -> int:
-        return self.position
-
-    def reset_position(self) -> bool:
+    def home(self) -> bool:
+        """Вернуть руку в исходную позу (центр X/Y, верх Z)."""
         if self.moving:
-            logger.error(f"{self.name}: нельзя сбросить позицию во время движения")
+            logger.error(f"{self.name}: нельзя домой во время движения")
             return False
-        self.position = 0
+        self.tool = {
+            "x": (self.ranges["x"][0] + self.ranges["x"][1]) / 2,
+            "y": (self.ranges["y"][0] + self.ranges["y"][1]) / 2,
+            "z": self.ranges["z"][1],
+        }
+        self._sync_joints()
+        logger.info(f"{self.name}: переход в исходную позу")
+        return True
+
+    def get_tool_position(self) -> dict:
+        return dict(self.tool)
+
+    def get_joints(self) -> dict:
+        return dict(self.joints)
+
+    def get_status(self) -> str:
+        if self.controller is None:
+            return "Рука: контроллер не назначен"
+        state = "движется" if self.moving else "остановлена"
+        return (f"Рука {state}, инструмент "
+                f"X={self.tool['x']:.0f}, Y={self.tool['y']:.0f}, Z={self.tool['z']:.0f}")
+
+    def __repr__(self) -> str:
+        return (f"<RoboticArm x={self.tool['x']:.0f} y={self.tool['y']:.0f} "
+                f"z={self.tool['z']:.0f} moving={self.moving}>")
+
+
+# ============================================================
+# Эрозионный катод
+# ============================================================
+
+class ErosionCathodeStub:
+    """Эрозионный катод — часть рабочей головки, инструмент эрозии."""
+
+    def __init__(self):
+        self.name = "Эрозионный катод"
+        self.connected = False     # подключён к источнику эрозии
+        self.active = False        # идёт ли эрозионное воздействие
+
+    def connect(self) -> bool:
+        self.connected = True
+        logger.info(f"{self.name}: подключён к источнику эрозии")
+        return True
+
+    def disconnect(self) -> bool:
+        self.active = False
+        self.connected = False
+        logger.info(f"{self.name}: отключён")
+        return True
+
+    def set_active(self, state: bool, source_on: bool) -> bool:
+        if state and not (self.connected and source_on):
+            logger.error(f"{self.name}: нет питания/подключения источника эрозии")
+            return False
+        self.active = bool(state)
+        logger.info(f"{self.name}: эрозия {'идёт' if self.active else 'остановлена'}")
         return True
 
     def get_status(self) -> str:
-        state = "движется" if self.moving else "остановлен"
-        return f"Координатный стол {state}, позиция: {self.position}"
+        if not self.connected:
+            return "Катод: не подключён"
+        return f"Катод: подключён, эрозия {'идёт' if self.active else 'нет'}"
 
     def __repr__(self) -> str:
-        return f"<PositioningTable pos={self.position} moving={self.moving}>"
+        return f"<Cathode connected={self.connected} active={self.active}>"
+
+
+# ============================================================
+# Эрозионный анод
+# ============================================================
+
+class ErosionAnodeStub:
+    """Эрозионный анод — часть рабочей головки, работает с катодом."""
+
+    def __init__(self):
+        self.name = "Эрозионный анод"
+        self.connected = False
+
+    def connect(self) -> bool:
+        self.connected = True
+        logger.info(f"{self.name}: подключён к источнику эрозии")
+        return True
+
+    def disconnect(self) -> bool:
+        self.connected = False
+        logger.info(f"{self.name}: отключён")
+        return True
+
+    def get_status(self) -> str:
+        return f"Анод: {'подключён' if self.connected else 'не подключён'}"
+
+    def __repr__(self) -> str:
+        return f"<Anode connected={self.connected}>"
 
 
 # ============================================================
@@ -740,8 +762,8 @@ class PositioningTableStub:
 
 class LaserStub:
     """
-    Лазерный излучатель — рабочий инструмент эрозионной обработки.
-    Заменяет прежнюю ёмкость для полировки с электродами (анод/катод).
+    Лазерный излучатель — часть лазерно-эрозионной рабочей головки.
+    Используется для лазерной обработки совместно с электроэрозионным воздействием.
 
     Параметры берутся с вкладки «Лазером»:
         power     — мощность, Вт              (0 … 500)
@@ -752,7 +774,7 @@ class LaserStub:
         mode      — режим излучения            (LaserMode)
 
     Излучение включается, когда задана мощность (> 0) И подано силовое питание
-    (48 В через транзисторный ключ LASER).
+    от источника лазера (через транзисторный ключ LASER).
     """
 
     PARAM_RANGES = {
@@ -769,7 +791,7 @@ class LaserStub:
 
     def __init__(self):
         self.name = "Лазерный излучатель"
-        self.powered = False        # подано ли силовое питание (48 В)
+        self.powered = False        # подано ли силовое питание
         self.emitting = False       # идёт ли излучение
         self.power = 0
         self.frequency = 0
@@ -810,7 +832,7 @@ class LaserStub:
             logger.error(f"{self.name}: мощность не задана")
             return False
         if not power_applied:
-            logger.error(f"{self.name}: нет силового питания (транзисторный ключ закрыт)")
+            logger.error(f"{self.name}: нет силового питания (источник лазера выключен)")
             return False
         self.powered = True
         self.emitting = True
@@ -839,6 +861,172 @@ class LaserStub:
     def __repr__(self) -> str:
         return (f"<Laser emitting={self.emitting} P={self.power}Вт "
                 f"f={self.frequency}Гц mode={self.mode.value}>")
+
+
+# ============================================================
+# Система подачи воды
+# ============================================================
+
+class WaterSupplySystemStub:
+    """
+    Система подачи воды в рабочую зону (заменяет полировочную ванну).
+    Вода не хранится в ванне, а подаётся напрямую в рабочую зону через сопло.
+
+    Состав: насос, электромагнитный клапан, канал подачи, датчик давления,
+    датчик расхода, слив (отвод воды).
+
+    Поток есть, когда: насос включён И клапан открыт. При потоке устанавливаются
+    рабочие давление и расход; без потока — нулевые.
+    """
+
+    def __init__(self, work_pressure: float = 2.5, work_flow: float = 3.0,
+                 min_flow: float = 0.5):
+        self.name = "Система подачи воды"
+        self.pump_on = False
+        self.valve_open = False
+        self.pressure = 0.0        # бар (датчик давления)
+        self.flow = 0.0            # л/мин (датчик расхода)
+        self.drain_open = False    # слив рабочей зоны
+        self._work_pressure = float(work_pressure)
+        self._work_flow = float(work_flow)
+        self.min_flow = float(min_flow)   # минимальный расход для охлаждения
+
+    def set_pump(self, state: bool, power_available: bool = True) -> bool:
+        if state and not power_available:
+            logger.error(f"{self.name}: нет питания насоса")
+            return False
+        self.pump_on = bool(state)
+        self._update_sensors()
+        logger.info(f"{self.name}: насос {'включён' if self.pump_on else 'выключен'}")
+        return True
+
+    def set_valve(self, state: bool) -> bool:
+        self.valve_open = bool(state)
+        self._update_sensors()
+        logger.info(f"{self.name}: клапан "
+                    f"{'открыт' if self.valve_open else 'закрыт'}")
+        return True
+
+    def set_drain(self, state: bool) -> bool:
+        self.drain_open = bool(state)
+        logger.info(f"{self.name}: слив "
+                    f"{'открыт' if self.drain_open else 'закрыт'}")
+        return True
+
+    def start_supply(self, power_available: bool = True) -> bool:
+        """Подать воду в рабочую зону: открыть клапан и включить насос."""
+        if not self.set_valve(True):
+            return False
+        return self.set_pump(True, power_available=power_available)
+
+    def stop_supply(self) -> bool:
+        """Прекратить подачу: выключить насос и закрыть клапан."""
+        self.set_pump(False)
+        self.set_valve(False)
+        return True
+
+    def _update_sensors(self) -> None:
+        flowing = self.pump_on and self.valve_open
+        self.pressure = self._work_pressure if flowing else 0.0
+        self.flow = self._work_flow if flowing else 0.0
+
+    def is_flowing(self) -> bool:
+        return self.flow >= self.min_flow
+
+    def get_pressure(self) -> float:
+        return self.pressure
+
+    def get_flow(self) -> float:
+        return self.flow
+
+    def simulate_pressure(self, value: float) -> bool:
+        """Тестовая утилита — задать давление (TestHarness)."""
+        self.pressure = max(0.0, float(value))
+        return True
+
+    def simulate_flow(self, value: float) -> bool:
+        """Тестовая утилита — задать расход (TestHarness)."""
+        self.flow = max(0.0, float(value))
+        return True
+
+    def get_status(self) -> str:
+        return (f"Вода: насос {'вкл' if self.pump_on else 'выкл'}, "
+                f"клапан {'открыт' if self.valve_open else 'закрыт'}, "
+                f"давление {self.pressure:.1f} бар, расход {self.flow:.1f} л/мин, "
+                f"слив {'открыт' if self.drain_open else 'закрыт'}")
+
+    def __repr__(self) -> str:
+        return f"<WaterSupply pump={self.pump_on} valve={self.valve_open} flow={self.flow}>"
+
+
+# ============================================================
+# Лазерно-эрозионная рабочая головка
+# ============================================================
+
+class WorkingHeadStub:
+    """
+    Лазерно-эрозионная рабочая головка — узел, объединяющий эрозионную обработку
+    и лазерное воздействие. Содержит лазерный излучатель, эрозионные катод и анод
+    и сопло подачи воды (вода поступает из системы подачи воды).
+
+    Сам по себе ничего не решает — это композиция узлов головки. Энергоподача и
+    запуск воздействия выполняются ProcessController через источники питания.
+    """
+
+    def __init__(self, laser: LaserStub, cathode: ErosionCathodeStub,
+                 anode: ErosionAnodeStub, water: WaterSupplySystemStub):
+        self.name = "Лазерно-эрозионная рабочая головка"
+        self.laser = laser
+        self.cathode = cathode
+        self.anode = anode
+        self.water = water       # сопло подачи воды питается от системы подачи
+
+    def is_machining(self) -> bool:
+        """Идёт ли обработка: излучение лазера ИЛИ эрозия."""
+        return self.laser.is_emitting() or self.cathode.active
+
+    def get_status(self) -> str:
+        return (f"Головка: лазер {'излучает' if self.laser.is_emitting() else 'выкл'}, "
+                f"эрозия {'идёт' if self.cathode.active else 'нет'}, "
+                f"полив {'есть' if self.water.is_flowing() else 'нет'}")
+
+    def __repr__(self) -> str:
+        return f"<WorkingHead machining={self.is_machining()}>"
+
+
+# ============================================================
+# Крепление детали (неподвижный рабочий стол)
+# ============================================================
+
+class WorkpieceFixtureStub:
+    """
+    Крепление детали — неподвижное основание для фиксации заготовки во время
+    обработки. Позиционирование полностью выполняет 8-суставная рука, поэтому
+    стол не перемещается — он только удерживает (зажимает) деталь.
+    """
+
+    def __init__(self):
+        self.name = "Крепление детали"
+        self.clamped = False
+
+    def clamp(self) -> bool:
+        self.clamped = True
+        logger.info(f"{self.name}: деталь зажата")
+        return True
+
+    def release(self) -> bool:
+        self.clamped = False
+        logger.info(f"{self.name}: деталь освобождена")
+        return True
+
+    def is_clamped(self) -> bool:
+        return self.clamped
+
+    def get_status(self) -> str:
+        return f"Крепление детали: {'деталь зажата' if self.clamped else 'свободно'}"
+
+    def __repr__(self) -> str:
+        return f"<Fixture clamped={self.clamped}>"
 
 
 # ============================================================
@@ -889,32 +1077,42 @@ class HardwareRegistry:
 
     def __init__(
         self,
-        stepper_speed: int = 150,
-        table_speed: int = 100,
-        current_limit: float = 8.0,
+        arm_speed: int = 150,
+        edm_current_limit: float = 8.0,
         max_temperature: float = 80.0,
         initial_temperature: float = 25.0,
         laser_power_at_start: int = 200,
         ac_dc_initially_on: bool = True,
         lid_initially_closed: bool = True,
     ):
+        # Питание и коммутация
         self.ac_dc_converter   = AcDcConverterStub(initially_on=ac_dc_initially_on)
         self.transistors       = TransistorSwitchBlockStub()
-        self.power_supply_48v  = PowerSupply48VStub(current_limit=current_limit)
+        self.edm_power_supply  = EdmPowerSupplyStub(current_limit=edm_current_limit)
+        self.laser_power_supply = LaserPowerSupplyStub()
+
+        # Безопасность
         self.lid_sensor        = LidSensorStub(initially_closed=lid_initially_closed)
-        self.stepper_driver    = StepperMotorDriverStub()
-        self.stepper_motor     = StepperMotorStub()
-        self.table_controller  = TableControllerStub()
-        self.table             = PositioningTableStub()
-        self.laser             = LaserStub()
         self.temperature_sensor = TemperatureSensorStub(
             initial=initial_temperature, max_temperature=max_temperature,
         )
 
-        # Заводская настройка под обработку СТАЛИ: импульсный режим и параметры
-        # лазера, подобранные под лазерно-эрозионную обработку стальной заготовки.
-        # Видны в снимке сразу при запуске — вкладки «Лазером» и «Параметры
-        # устройства» открываются уже заполненными под сталь.
+        # Позиционирование: контроллер робота + 8-суставная рука
+        self.robot_controller  = RobotControllerStub()
+        self.arm               = RoboticArmStub()
+
+        # Рабочая головка: лазер + эрозионные электроды + сопло воды
+        self.laser             = LaserStub()
+        self.cathode           = ErosionCathodeStub()
+        self.anode             = ErosionAnodeStub()
+        self.water             = WaterSupplySystemStub()
+        self.head              = WorkingHeadStub(
+            self.laser, self.cathode, self.anode, self.water)
+
+        # Неподвижное крепление детали
+        self.fixture           = WorkpieceFixtureStub()
+
+        # Заводская настройка лазера под обработку СТАЛИ (видна в снимке сразу).
         self.laser.set_mode(LaserMode.PULSED)
         self.laser.set_param("power", laser_power_at_start)  # 200 Вт
         self.laser.set_param("frequency", 20000)             # 20 кГц
@@ -922,32 +1120,26 @@ class HardwareRegistry:
         self.laser.set_param("pulse", 100)                   # 100 мкс
         self.laser.set_param("exposure", 1000)               # 1000 мс
 
-        # Исходное положение: головка в центре стола (X) и чуть выше его
-        # поверхности (Z), стол — по центру хода подачи (Y).
-        m = self.stepper_motor
-        m.pos["x"] = (m.min_position + m.max_position) // 2
-        m.pos["z"] = m.min_position + round((m.max_position - m.min_position) * 0.15)
-        self.table.position = (self.table.min_position + self.table.max_position) // 2
+        # Исходная поза руки: инструмент в центре рабочей зоны, вверху по Z.
+        a = self.arm
+        a.tool["x"] = (a.ranges["x"][0] + a.ranges["x"][1]) / 2
+        a.tool["y"] = (a.ranges["y"][0] + a.ranges["y"][1]) / 2
+        a.tool["z"] = a.ranges["z"][1]
+        a._sync_joints()
 
-        # Скорости привода и стола под сталь — выставляем сразу, чтобы профиль
-        # был виден в снимке ещё до инициализации (повторно подтвердятся в init).
-        self.stepper_driver.set_speed(stepper_speed)
-        self.table_controller.set_speed(table_speed)
+        # Темп отработки траектории — выставляем сразу (повторно подтвердится в init).
+        self.robot_controller.set_speed(arm_speed)
 
         # Стартовые настройки — применяются при init.
-        self._initial_stepper_speed = stepper_speed
-        self._initial_table_speed = table_speed
+        self._initial_arm_speed = arm_speed
         self._initial_laser_power = laser_power_at_start
 
     def apply_initial_state(self) -> None:
         """Подготавливает железо в стартовое состояние (вызывается при init)."""
-        # Привод головки X/Z
-        self.stepper_motor.attach_driver(self.stepper_driver)
-        self.stepper_driver.set_speed(self._initial_stepper_speed)
-        # Координатный стол + его контроллер
-        self.table.attach_controller(self.table_controller)
-        self.table_controller.set_speed(self._initial_table_speed)
-        # Лазер: стартовая мощность (по умолчанию 0 — задаётся оператором с вкладки)
+        # Рука + контроллер робота
+        self.arm.attach_controller(self.robot_controller)
+        self.robot_controller.set_speed(self._initial_arm_speed)
+        # Лазер: стартовая мощность
         if self._initial_laser_power > 0:
             self.laser.set_param("power", self._initial_laser_power)
 
@@ -958,32 +1150,37 @@ class HardwareRegistry:
 
 class ProcessController:
     """
-    Управление технологическим процессом лазерной эрозии.
-    Только то, что относится к старту/остановке/мониторингу —
-    никаких мок-методов здесь нет.
+    Управление технологическим процессом лазерно-эрозионной обработки.
+    Только старт/остановка/мониторинг — никаких мок-методов здесь нет.
     """
 
-    # Номинальная длительность цикла полировки, с (симуляция: реальный рецепт
-    # длительности не задаёт — прогресс набирается за это время).
+    # Номинальная длительность цикла обработки, с (симуляция).
     PROCESS_DURATION = 30.0
 
     def __init__(self, hardware: HardwareRegistry):
         self.hw = hardware
         self.initialized = False
         self.process_running = False
-        self.paused = False          # процесс на паузе (излучение приостановлено)
-        self.progress = 0.0          # выполнение цикла, 0…100 %
+        self.paused = False
+        self.progress = 0.0
 
-        # Программа обработки — плоский контур в координатах станка:
-        #   точки (X головки, Y стола). По нему ведётся головка во время
-        #   процесса (drive_scan), позиция выбирается по доле прогресса.
+        # Программа обработки — плоский контур в координатах рабочей зоны:
+        #   точки (X, Y). По нему рука ведёт головку во время процесса.
         self.toolpath: list = []     # [(X, Y), …]
-        self._tp_cum: list = []      # накопленная длина пути до каждой точки
-        self._tp_total: float = 0.0  # полная длина пути
+        self._tp_cum: list = []
+        self._tp_total: float = 0.0
+        # Признак загруженной 3D-модели детали (STL/OBJ). Это альтернативный
+        # вид задания: прошивка несквозного отверстия по модели не требует
+        # плоского контура, поэтому загруженная деталь сама по себе разрешает
+        # запуск процесса (см. _check_start_conditions / process_readiness).
+        self.part_loaded: bool = False
+        # Параметры хода головки при прошивке отверстия (доли рабочей зоны
+        # X/Y, куда подвести инструмент). По Z головка опускается с ростом
+        # прогресса — имитация подвода и заглубления, как на реальном станке.
+        self._mach_motion = None     # (xf, yf) или None
 
     # ---- программа обработки (контур) ----
     def set_toolpath(self, points) -> bool:
-        """Загрузить контур (список точек (X, Y) в координатах станка)."""
         pts = [(int(p[0]), int(p[1])) for p in (points or [])]
         self.toolpath = pts
         self._tp_cum = [0.0]
@@ -1002,14 +1199,56 @@ class ProcessController:
         logger.info("Программа обработки сброшена")
         return True
 
+    def set_part_loaded(self, on) -> bool:
+        """Отметить, загружена ли 3D-модель детали (задание-«прошивка»)."""
+        self.part_loaded = bool(on)
+        logger.info("3D-модель детали загружена" if self.part_loaded
+                    else "3D-модель детали выгружена")
+        return True
+
+    def set_machining_motion(self, xf=None, yf=None) -> bool:
+        """Задать точку подвода головки для прошивки (доли рабочей зоны X/Y),
+        либо сбросить (xf=None). По ней рука ведёт инструмент во время процесса."""
+        if xf is None or yf is None:
+            self._mach_motion = None
+        else:
+            self._mach_motion = (max(0.0, min(1.0, float(xf))),
+                                 max(0.0, min(1.0, float(yf))))
+        return True
+
+    def _drive_machining_head(self) -> None:
+        """Двигать инструмент руки по ходу прошивки: быстрый подвод по X/Y к
+        точке отверстия, затем опускание по Z (фаза лазера — у поверхности,
+        фаза эрозии — заглубление). Делает движение заглушки видимым и
+        согласованным в показе детали и на вкладке «Позиционирование»."""
+        if self._mach_motion is None:
+            return
+        arm = self.hw.arm
+        xf, yf = self._mach_motion
+        rx = arm.ranges["x"]; ry = arm.ranges["y"]; rz = arm.ranges["z"]
+        tx = rx[0] + xf * (rx[1] - rx[0])
+        ty = ry[0] + yf * (ry[1] - ry[0])
+        p = max(0.0, min(1.0, self.progress / 100.0))
+        # профиль высоты Z (доля зоны, 1 — вверху): подвод → лазер → заглубление
+        if p < 0.08:                      # быстрый подвод сверху к поверхности
+            zf = 0.85 - (0.85 - 0.55) * (p / 0.08)
+        elif p < 0.22:                    # лазер режет эмаль — почти у поверхности
+            zf = 0.55 - 0.05 * ((p - 0.08) / 0.14)
+        else:                             # эрозия — заглубление электрода
+            zf = 0.50 - 0.24 * ((p - 0.22) / 0.78)
+        tz = rz[0] + max(0.0, min(1.0, zf)) * (rz[1] - rz[0])
+        moved = (abs(arm.tool["x"] - tx) + abs(arm.tool["y"] - ty)
+                 + abs(arm.tool["z"] - tz)) > 1e-6
+        arm.tool["x"] = tx; arm.tool["y"] = ty; arm.tool["z"] = tz
+        arm._sync_joints()
+        arm.moving = moved
+
     def _point_at(self, frac: float):
-        """Точка (X, Y) на контуре по доле пройденного пути frac∈[0..1]."""
         if not self.toolpath:
             return None
         if self._tp_total <= 0:
             return self.toolpath[0]
         target = max(0.0, min(1.0, frac)) * self._tp_total
-        # ищем сегмент, на который попадает target
         for i in range(1, len(self._tp_cum)):
             if self._tp_cum[i] >= target:
                 seg = self._tp_cum[i] - self._tp_cum[i - 1] or 1.0
@@ -1032,18 +1271,28 @@ class ProcessController:
             logger.error("AC/DC не выдаёт выходное напряжение")
             return False
 
-        # Назначаем приводы и стартовые скорости/параметры
+        # Назначаем приводы и стартовые параметры
         self.hw.apply_initial_state()
         self.hw.transistors.set_load_power(True)
 
-        # Привод головки X/Z — запитан от логического напряжения, готов к наладке
-        if not self.hw.stepper_driver.enable(power_available=logic_power):
+        # Контроллер робота выходит на связь и разрешает наладочные движения.
+        # Питание приводов руки — через транзисторный ключ ARM_DRIVES.
+        self.hw.transistors.turn_on(TransistorChannel.ARM_DRIVES)
+        arm_power = self.hw.transistors.is_channel_on(TransistorChannel.ARM_DRIVES)
+        self.hw.robot_controller.connect()
+        if not self.hw.robot_controller.enable(power_available=arm_power):
             return False
 
-        # Контроллер стола выходит на связь и разрешает наладочные перемещения
-        self.hw.table_controller.connect()
-        if not self.hw.table_controller.enable(power_available=logic_power):
-            return False
+        # Зажимаем деталь в неподвижном креплении.
+        self.hw.fixture.clamp()
+
+        # Эрозионные электроды подключаем к источнику (источник пока выключен).
+        self.hw.cathode.connect()
+        self.hw.anode.connect()
+
+        # Система воды в исходном состоянии: насос выкл, клапан закрыт, слив закрыт.
+        self.hw.water.stop_supply()
+        self.hw.water.set_drain(False)
 
         self.initialized = True
         logger.info("=== Контроллер готов к работе ===")
@@ -1071,11 +1320,15 @@ class ProcessController:
         if not self.hw.laser.is_ready():
             logger.error("Лазер не настроен (мощность 0 Вт)")
             return False
-        if not self.hw.table_controller.online:
-            logger.error("Контроллер стола не на связи")
+        if not self.hw.robot_controller.online:
+            logger.error("Контроллер робота не на связи")
             return False
-        if not self.toolpath:
-            logger.error("Не загружена программа обработки (контур)")
+        if not self.hw.fixture.is_clamped():
+            logger.error("Деталь не зафиксирована в креплении")
+            return False
+        if not self.toolpath and not self.part_loaded:
+            logger.error("Не загружена программа обработки (контур) "
+                         "или 3D-модель детали")
             return False
         return True
 
@@ -1088,81 +1341,101 @@ class ProcessController:
         t = self.hw.transistors
         t.set_load_power(self.hw.ac_dc_converter.get_output_voltage() > 0)
 
-        # 1) Разрешаем и включаем источник 48 В
-        if not t.turn_on(TransistorChannel.POWER_48V):
-            return False
-        if not self.hw.power_supply_48v.turn_on(
-            power_allowed=t.is_channel_on(TransistorChannel.POWER_48V)
+        # 1) Разрешаем питание эрозии и включаем источник эрозии
+        if not t.turn_on(TransistorChannel.EDM):
+            self.stop_process(); return False
+        if not self.hw.edm_power_supply.turn_on(
+            power_allowed=t.is_channel_on(TransistorChannel.EDM)
         ):
-            self.stop_process()
-            return False
-
-        # 2) Подаём силовое питание на привод подачи стола
-        if not t.turn_on(TransistorChannel.TABLE_FEED):
+            self.stop_process(); return False
+        # Запускаем эрозионное воздействие (катод + анод)
+        if not self.hw.cathode.set_active(True, self.hw.edm_power_supply.is_on()):
             self.stop_process(); return False
 
-        # 3) Подаём 48 В на лазер и включаем излучение
+        # 2) Подаём воду в рабочую зону (питание насоса через ключ WATER)
+        if not t.turn_on(TransistorChannel.WATER):
+            self.stop_process(); return False
+        if not self.hw.water.start_supply(
+            power_available=t.is_channel_on(TransistorChannel.WATER)
+        ):
+            self.stop_process(); return False
+
+        # 3) Включаем источник лазера (только при закрытой крышке и готовности)
         if not t.turn_on(TransistorChannel.LASER):
             self.stop_process(); return False
+        if not self.hw.laser_power_supply.turn_on(
+            power_allowed=t.is_channel_on(TransistorChannel.LASER),
+            lid_closed=self.hw.lid_sensor.is_closed(),
+            system_ready=self.initialized,
+        ):
+            self.stop_process(); return False
 
-        power_applied = (
-            t.is_channel_on(TransistorChannel.LASER)
-            and self.hw.power_supply_48v.is_on()
-        )
-        if not self.hw.laser.start_emission(power_applied):
-            self.stop_process()
-            return False
+        # 4) Включаем излучение лазера
+        if not self.hw.laser.start_emission(self.hw.laser_power_supply.is_on()):
+            self.stop_process(); return False
 
         self.process_running = True
         self.paused = False
         self.progress = 0.0
         # головка встаёт в начало контура (если программа загружена)
         if self.toolpath:
-            self.hw.stepper_motor.pos["x"] = self.toolpath[0][0]
-            self.hw.table.position = self.toolpath[0][1]
+            self.hw.arm.tool["x"] = self.toolpath[0][0]
+            self.hw.arm.tool["y"] = self.toolpath[0][1]
+            self.hw.arm._sync_joints()
+        elif self._mach_motion is not None:
+            # задание-«прошивка»: сразу подводим инструмент к точке отверстия
+            self._drive_machining_head()
         logger.info("=== Процесс запущен ===")
         return True
 
     def stop_process(self) -> bool:
         logger.info("=== Остановка процесса ===")
         self.hw.laser.stop_emission()
-        self.hw.table.stop()
+        self.hw.laser_power_supply.turn_off()
+        self.hw.cathode.set_active(False, False)
+        self.hw.edm_power_supply.turn_off()
+        self.hw.water.stop_supply()
         self._stop_scan()
         self.hw.transistors.turn_off(TransistorChannel.LASER)
-        self.hw.transistors.turn_off(TransistorChannel.TABLE_FEED)
-        self.hw.transistors.turn_off(TransistorChannel.POWER_48V)
-        self.hw.power_supply_48v.turn_off()
+        self.hw.transistors.turn_off(TransistorChannel.EDM)
+        self.hw.transistors.turn_off(TransistorChannel.WATER)
         self.process_running = False
         self.paused = False
         self.progress = 0.0
+        self.hw.arm.moving = False        # головка остановлена
         logger.info("=== Процесс остановлен ===")
         return True
 
     def pause_process(self) -> bool:
-        """Приостановить процесс: гасим излучение и подачу стола, прогресс замирает."""
+        """Пауза: гасим излучение, эрозию и подачу воды; прогресс замирает."""
         if not self.process_running:
             logger.error("Процесс не запущен — пауза недоступна")
             return False
         if self.paused:
             return True
         self.hw.laser.stop_emission()
-        self.hw.table.stop()
+        self.hw.cathode.set_active(False, False)
+        self.hw.water.set_pump(False)
         self._stop_scan()
         self.paused = True
+        self.hw.arm.moving = False        # на паузе головка замирает
         logger.info("=== Процесс приостановлен ===")
         return True
 
     def resume_process(self) -> bool:
-        """Возобновить процесс после паузы: снова включаем излучение."""
+        """Возобновление после паузы: снова включаем воздействие."""
         if not self.process_running:
             logger.error("Процесс не запущен — возобновление недоступно")
             return False
         if not self.paused:
             return True
-        power_applied = (
-            self.hw.transistors.is_channel_on(TransistorChannel.LASER)
-            and self.hw.power_supply_48v.is_on()
-        )
+        # Снова подаём воду
+        self.hw.water.set_pump(
+            True, power_available=self.hw.transistors.is_channel_on(TransistorChannel.WATER))
+        # Снова включаем эрозию
+        self.hw.cathode.set_active(True, self.hw.edm_power_supply.is_on())
+        # Снова включаем излучение
+        power_applied = self.hw.laser_power_supply.is_on()
         if not self.hw.laser.start_emission(power_applied):
             logger.error("Не удалось возобновить излучение")
             return False
@@ -1171,105 +1444,111 @@ class ProcessController:
         return True
 
     def advance_progress(self, dt: float) -> None:
-        """Продвинуть прогресс цикла на dt секунд (вызывается из мониторинга).
-
-        Пока процесс на паузе или не запущен — прогресс не растёт. По достижении
-        100 % процесс штатно завершается (stop_process).
-        """
         if not self.process_running or self.paused or self.PROCESS_DURATION <= 0:
             return
         self.progress = min(
             100.0, self.progress + dt / self.PROCESS_DURATION * 100.0)
+        self._drive_machining_head()      # ход головки по прогрессу (прошивка)
         if self.progress >= 100.0:
             logger.info("=== Процесс завершён (100 %) ===")
             self.stop_process()
 
     # ---- движение головки по контуру во время процесса ----
     def drive_scan(self) -> None:
-        """Вести головку по загруженному контуру, пока идёт обработка.
-
-        Позиция вдоль контура выбирается по доле прогресса: X задаёт головку
-        (шаговый привод), Y — координатный стол. Если контур не загружен,
-        просто горит индикатор «движется» как признак активной обработки.
-        На паузе и вне процесса индикатор гаснет.
-        """
         if not self.process_running or self.paused:
             return
-        d = self.hw.stepper_driver
-        if not d.enabled:
+        rc = self.hw.robot_controller
+        if not rc.enabled:
             return
-        self.hw.stepper_motor.moving = True
-        d.moving = True
-        d.direction = 1
+        self.hw.arm.moving = True
+        rc.moving = True
+        rc.direction = 1
 
-        # ведём головку и стол по точке контура для текущей доли прогресса
         pt = self._point_at(self.progress / 100.0)
         if pt is not None:
-            self.hw.stepper_motor.pos["x"] = pt[0]
-            self.hw.table.position = pt[1]
-            self.hw.table.moving = True
+            self.hw.arm.tool["x"] = pt[0]
+            self.hw.arm.tool["y"] = pt[1]
+            self.hw.arm._sync_joints()
 
     def _stop_scan(self) -> None:
-        """Погасить индикатор движения ШД (флаги ШД и драйвера)."""
-        self.hw.stepper_motor.moving = False
-        self.hw.stepper_driver.moving = False
-        self.hw.stepper_driver.direction = 0
-        self.hw.table.moving = False
+        self.hw.arm.moving = False
+        self.hw.robot_controller.moving = False
+        self.hw.robot_controller.direction = 0
 
     def emergency_stop(self) -> bool:
         logger.warning("!!! АВАРИЙНАЯ ОСТАНОВКА !!!")
-        self.hw.stepper_motor.stop()
-        self.hw.stepper_driver.disable()
+        self.hw.arm.stop()
+        self.hw.robot_controller.disable()
         self.hw.laser.stop_emission()
-        self.hw.table.stop()
-        self.hw.table_controller.disable()
+        self.hw.laser_power_supply.turn_off()
+        self.hw.cathode.set_active(False, False)
+        self.hw.edm_power_supply.turn_off()
+        self.hw.water.stop_supply()
+        self.hw.water.set_drain(True)        # сбрасываем воду из рабочей зоны
         self.hw.transistors.turn_off_all()
-        self.hw.power_supply_48v.turn_off()
         self.process_running = False
         self.paused = False
         self.progress = 0.0
-        # Авария оставляет железо в обесточенном состоянии (приводы заглушены,
-        # ключи и источник выключены), поэтому система больше не считается
-        # инициализированной: запуск блокируется до повторной инициализации,
-        # которая заново включит приводы и проверит условия.
+        # Авария оставляет железо обесточенным — требуется повторная инициализация.
         self.initialized = False
         return True
 
-    # ---- движение головки X/Z ----
-    def move_motor_to(self, x=None, z=None) -> bool:
+    # ---- движение руки (наладка) ----
+    def move_tool_to(self, x=None, y=None, z=None) -> bool:
         if not self._require_initialized():
             return False
         if self.process_running:
-            logger.error("Нельзя двигать привод во время процесса")
+            logger.error("Нельзя двигать руку во время процесса")
             return False
-        if not self.hw.stepper_driver.enabled:
-            self.hw.stepper_driver.enable(
-                power_available=self.hw.ac_dc_converter.get_output_voltage() > 0
+        if not self.hw.robot_controller.enabled:
+            self.hw.robot_controller.enable(
+                power_available=self.hw.transistors.is_channel_on(
+                    TransistorChannel.ARM_DRIVES)
             )
-        return self.hw.stepper_motor.move_to(x, z)
+        return self.hw.arm.move_tool(x, y, z)
 
-    def set_motor_speed(self, speed: int) -> bool:
-        if not self._require_initialized():
-            return False
-        return self.hw.stepper_driver.set_speed(speed)
-
-    # ---- движение координатного стола ----
-    def move_table_to(self, position: int) -> bool:
+    def move_joint(self, joint: str, angle: float) -> bool:
         if not self._require_initialized():
             return False
         if self.process_running:
-            logger.error("Нельзя двигать стол во время процесса")
+            logger.error("Нельзя двигать сустав во время процесса")
             return False
-        if not self.hw.table_controller.enabled:
-            self.hw.table_controller.enable(
-                power_available=self.hw.ac_dc_converter.get_output_voltage() > 0
+        if not self.hw.robot_controller.enabled:
+            self.hw.robot_controller.enable(
+                power_available=self.hw.transistors.is_channel_on(
+                    TransistorChannel.ARM_DRIVES)
             )
-        return self.hw.table.move_to_position(position)
+        return self.hw.arm.move_joint(joint, angle)
 
-    def set_table_speed(self, speed: int) -> bool:
+    def set_arm_speed(self, speed: int) -> bool:
         if not self._require_initialized():
             return False
-        return self.hw.table_controller.set_speed(speed)
+        return self.hw.robot_controller.set_speed(speed)
+
+    # ---- система воды (наладка) ----
+    def set_water_supply(self, on: bool) -> bool:
+        if not self._require_initialized():
+            return False
+        if on:
+            self.hw.transistors.turn_on(TransistorChannel.WATER)
+            return self.hw.water.start_supply(
+                power_available=self.hw.transistors.is_channel_on(TransistorChannel.WATER))
+        self.hw.water.stop_supply()
+        return self.hw.transistors.turn_off(TransistorChannel.WATER)
+
+    def set_drain(self, on: bool) -> bool:
+        if not self._require_initialized():
+            return False
+        return self.hw.water.set_drain(on)
+
+    # ---- крепление детали (наладка) ----
+    def clamp_fixture(self, on: bool) -> bool:
+        if not self._require_initialized():
+            return False
+        if self.process_running:
+            logger.error("Нельзя менять зажим во время процесса")
+            return False
+        return self.hw.fixture.clamp() if on else self.hw.fixture.release()
 
     # ---- мониторинг (вызывать периодически) ----
     def check_safety(self) -> bool:
@@ -1287,13 +1566,19 @@ class ProcessController:
             self.emergency_stop()
             return False
 
-        if not self.hw.power_supply_48v.check_overcurrent():
-            logger.warning("Перегрузка по току!")
+        if not self.hw.edm_power_supply.check_overcurrent():
+            logger.warning("Перегрузка по току источника эрозии!")
             self.emergency_stop()
             return False
 
-        if not self.hw.power_supply_48v.is_on():
-            logger.warning("Источник 48 В отключился")
+        if not self.hw.edm_power_supply.is_on():
+            logger.warning("Источник эрозии отключился")
+            self.emergency_stop()
+            return False
+
+        # Потеря охлаждения: при активной обработке нет потока воды
+        if not self.paused and not self.hw.water.is_flowing():
+            logger.warning("Нет подачи воды во время процесса — потеря охлаждения!")
             self.emergency_stop()
             return False
 
@@ -1301,6 +1586,8 @@ class ProcessController:
 
     # ---- статус целиком ----
     def get_system_status(self) -> str:
+        a = self.hw.arm
+        joints = ", ".join(f"{j}={v:.0f}°" for j, v in a.get_joints().items())
         lines = [
             "========== СТАТУС СИСТЕМЫ ==========",
             f"Инициализация: {'выполнена' if self.initialized else 'нет'}",
@@ -1308,13 +1595,18 @@ class ProcessController:
             "",
             f"[AC/DC] {self.hw.ac_dc_converter.get_status()}",
             f"[Транзисторы]\n{self.hw.transistors.get_status()}",
-            f"[Источник 48 В] {self.hw.power_supply_48v.get_status()}",
+            f"[Источник эрозии] {self.hw.edm_power_supply.get_status()}",
+            f"[Источник лазера] {self.hw.laser_power_supply.get_status()}",
             f"[Крышка] {self.hw.lid_sensor.get_status()}",
-            f"[Драйвер ШД] {self.hw.stepper_driver.get_status()}",
-            f"[ШД X/Z] {self.hw.stepper_motor.get_status()}",
-            f"[Контроллер стола] {self.hw.table_controller.get_status()}",
-            f"[Стол] {self.hw.table.get_status()}",
+            f"[Контроллер робота] {self.hw.robot_controller.get_status()}",
+            f"[Рука] {a.get_status()}",
+            f"  суставы: {joints}",
+            f"[Головка] {self.hw.head.get_status()}",
+            f"[Катод] {self.hw.cathode.get_status()}",
+            f"[Анод] {self.hw.anode.get_status()}",
             f"[Лазер] {self.hw.laser.get_status()}",
+            f"[Вода] {self.hw.water.get_status()}",
+            f"[Крепление] {self.hw.fixture.get_status()}",
             f"[Температура] {self.hw.temperature_sensor.get_status()}",
             "====================================",
         ]
@@ -1328,16 +1620,14 @@ class ProcessController:
 class TestHarness:
     """
     Утилиты для имитации физических событий, которые в реальной системе
-    приходят от датчиков (открытие крышки, нагрев, ток источника).
-
-    В реальной прошивке этого класса НЕТ. Он нужен только для проверки
-    UI без подключённого железа.
+    приходят от датчиков (крышка, нагрев, ток эрозии, давление/расход воды).
+    В реальной прошивке этого класса НЕТ.
     """
 
     def __init__(self, hardware: HardwareRegistry,
                  process: Optional[ProcessController] = None):
         self.hw = hardware
-        self.process = process  # нужен, чтобы триггерить check_safety после событий
+        self.process = process
 
     def set_lid(self, closed: bool) -> bool:
         self.hw.lid_sensor.set_lid_state(closed)
@@ -1348,7 +1638,15 @@ class TestHarness:
         return self._notify_process()
 
     def simulate_current(self, value: float) -> bool:
-        return self.hw.power_supply_48v.simulate_current_draw(value)
+        return self.hw.edm_power_supply.simulate_current_draw(value)
+
+    def simulate_water_flow(self, value: float) -> bool:
+        self.hw.water.simulate_flow(value)
+        return self._notify_process()
+
+    def simulate_water_pressure(self, value: float) -> bool:
+        self.hw.water.simulate_pressure(value)
+        return self._notify_process()
 
     def _notify_process(self) -> bool:
         if self.process is not None:
@@ -1357,14 +1655,13 @@ class TestHarness:
 
 
 # ============================================================
-# Совместимость со старым кодом (если где-то использовал старое имя)
+# Совместимость со старым кодом
 # ============================================================
 
 class LaserErosionRobotController:
     """
     Фасад поверх HardwareRegistry + ProcessController + TestHarness,
-    сохраняет старый API на случай, если он где-то используется.
-    Новый код лучше работать напрямую с тремя классами выше.
+    сохраняет старый API. Новый код лучше работать напрямую с тремя классами.
     """
 
     def __init__(self, **kwargs):
@@ -1373,26 +1670,29 @@ class LaserErosionRobotController:
         self.test = TestHarness(self.hw, self.process)
 
         # Прямые ссылки для обратной совместимости
-        self.ac_dc_converter   = self.hw.ac_dc_converter
-        self.transistors       = self.hw.transistors
-        self.power_supply_48v  = self.hw.power_supply_48v
-        self.lid_sensor        = self.hw.lid_sensor
-        self.stepper_driver    = self.hw.stepper_driver
-        self.stepper_motor     = self.hw.stepper_motor
-        self.table_controller  = self.hw.table_controller
-        self.table             = self.hw.table
-        self.laser             = self.hw.laser
+        self.ac_dc_converter    = self.hw.ac_dc_converter
+        self.transistors        = self.hw.transistors
+        self.edm_power_supply   = self.hw.edm_power_supply
+        self.laser_power_supply = self.hw.laser_power_supply
+        self.lid_sensor         = self.hw.lid_sensor
+        self.robot_controller   = self.hw.robot_controller
+        self.arm                = self.hw.arm
+        self.laser              = self.hw.laser
+        self.cathode            = self.hw.cathode
+        self.anode              = self.hw.anode
+        self.water              = self.hw.water
+        self.head               = self.hw.head
+        self.fixture            = self.hw.fixture
         self.temperature_sensor = self.hw.temperature_sensor
 
-    # делегирование методов
     def initialize(self):           return self.process.initialize()
     def start_process(self):        return self.process.start_process()
     def stop_process(self):         return self.process.stop_process()
     def emergency_stop(self):       return self.process.emergency_stop()
-    def move_motor_to(self, x=None, z=None): return self.process.move_motor_to(x, z)
-    def move_table_to(self, p):     return self.process.move_table_to(p)
-    def set_stepper_speed(self, s): return self.process.set_motor_speed(s)
-    def set_table_speed(self, s):   return self.process.set_table_speed(s)
+    def move_tool_to(self, x=None, y=None, z=None):
+        return self.process.move_tool_to(x, y, z)
+    def move_joint(self, j, a):     return self.process.move_joint(j, a)
+    def set_arm_speed(self, s):     return self.process.set_arm_speed(s)
     def read_temperature(self):     return self.hw.temperature_sensor.read_temperature()
     def is_lid_closed(self):        return self.hw.lid_sensor.is_closed()
     def check_safety_during_process(self): return self.process.check_safety()
@@ -1403,7 +1703,6 @@ class LaserErosionRobotController:
     @property
     def process_running(self): return self.process.process_running
 
-    # мок-методы (для обратной совместимости — но лучше использовать self.test)
     def set_lid_state_mock(self, s):      return self.test.set_lid(s)
     def set_temperature_mock(self, v):    return self.test.set_temperature(v)
 
@@ -1413,10 +1712,7 @@ class LaserErosionRobotController:
 # ============================================================
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="[%(levelname)s] %(message)s",
-    )
+    logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
     hw = HardwareRegistry()
     process = ProcessController(hw)
@@ -1425,13 +1721,16 @@ if __name__ == "__main__":
     print(">>> Инициализация")
     process.initialize()
 
+    print("\n>>> Загружаем простой контур")
+    process.set_toolpath([(100, 100), (400, 100), (400, 300), (100, 300), (100, 100)])
+
     print("\n>>> Задаём параметры лазера (с вкладки «Лазером»)")
-    hw.laser.set_param("power", 500)
-    hw.laser.set_param("frequency", 1000)
+    hw.laser.set_param("power", 300)
     hw.laser.set_mode("Импульсный")
 
     print("\n>>> Запуск процесса")
     process.start_process()
+    process.drive_scan()
 
     print("\n>>> Открываем крышку — должна сработать авария")
     test.set_lid(False)

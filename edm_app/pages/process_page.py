@@ -95,9 +95,10 @@ class _ConditionsPanel(BasePanel):
         self.r_lid = IndicatorRow("Крышка закрыта")
         self.r_laser = IndicatorRow("Лазер готов")
         self.r_temp = IndicatorRow("Нет перегрева")
+        self.r_fix = IndicatorRow("Деталь зафиксирована")
         self.r_prog = IndicatorRow("Программа загружена")
         for r in (self.r_acdc, self.r_init, self.r_lid, self.r_laser,
-                  self.r_temp, self.r_prog):
+                  self.r_temp, self.r_fix, self.r_prog):
             self.body.addWidget(r)
 
 
@@ -183,6 +184,12 @@ class _TablePreviewPanel(BasePanel):
         self.body.addWidget(self.viewer, 1)
 
         self._mode = None    # "path" | "mesh" | None
+        # машинная обработка: исходная геометрия детали и параметры отверстия
+        self._orig_tris = None     # треугольники загруженной модели (до выреза)
+        self._orig_name = ""
+        self._site = None          # параметры устья (machining.pick_drill_site)
+        self._machining = False    # идёт ли анимация прошивки
+        self._carved = False       # вскрыто ли уже устье (фаза эрозии)
         self.m_info = MetricRow("Программа:", "не загружена")
         self.m_dims = MetricRow("Контур / габариты:", "—")
         self.body.addWidget(self.m_info)
@@ -197,25 +204,107 @@ class _TablePreviewPanel(BasePanel):
         self.m_dims.set_value(f"{vertices} точек · поле {size_mm}")
 
     def show_mesh(self, path: str) -> bool:
-        """Загрузить STL/OBJ во вьюпорт как предпросмотр детали."""
+        """Загрузить STL/OBJ во вьюпорт как предпросмотр детали.
+
+        Дополнительно подбирается место под несквозное отверстие
+        (machining.pick_drill_site) — оно используется при запуске процесса для
+        анимации прошивки. Если подходящей стенки нет, модель просто
+        показывается как предпросмотр (без прошивки)."""
         import os
         ext = os.path.splitext(path)[1].lower()
         if ext not in (".stl", ".obj"):
             self.clear()
             self.m_info.set_value("формат без 3D-модели", "warn")
             return False
+        from ..components.viewer3d import load_mesh
+        from ..components import machining
         try:
-            self.viewer.load_file(path)
+            tris = load_mesh(path)
+            self.viewer.set_mesh(tris, os.path.basename(path))
         except Exception as exc:  # noqa: BLE001 — показать ошибку оператору
             self.clear()
             self.m_info.set_value(f"ошибка чтения: {exc}", "err")
             return False
+        # сбросить возможную предыдущую прошивку и подобрать новое устье
+        self.viewer.clear_overlay()
+        self.viewer.clear_drill()
+        self._machining = False
+        self._orig_tris = tris
+        self._orig_name = os.path.basename(path)
+        self._site = machining.pick_drill_site(tris)
         self._mode = "mesh"
         info = self.viewer.mesh_info()
         sx, sy, sz = info["size"]
         self.m_info.set_value(f"{info['name']} ({info['tris']} тр.)", "ok")
         self.m_dims.set_value(f"{sx:.1f} × {sy:.1f} × {sz:.1f}")
         return True
+
+    # ---- анимация прошивки несквозного отверстия ----------------------
+    def start_machining(self) -> bool:
+        """Запуск процесса: навести камеру на стенку. Деталь пока цела — лазер
+        будет обводить контур по целой поверхности; устье вскрывается позже,
+        в фазе эрозии. Возвращает True, если прошивка возможна."""
+        if self._mode != "mesh" or not self._site or self._orig_tris is None:
+            return False
+        self.viewer.aim_at_normal(*self._site["out"])   # ракурс «в лоб» стенке
+        self._machining = True
+        self._carved = False
+        self.update_machining(0.0)
+        return True
+
+    def update_machining(self, progress: float) -> None:
+        """Обновить визуализацию по прогрессу (0..100): фаза лазера — обводка
+        контура по целой детали; фаза эрозии — вскрытое устье и заглубление."""
+        if not self._machining or not self._site:
+            return
+        from ..components import machining
+        phase, depth, hot, sweep = machining.phase_state(progress, self._site)
+        # в фазе эрозии один раз физически вскрываем устье в детали
+        if phase == machining.PHASE_EDM and not self._carved:
+            carved = machining.carve_body(self._orig_tris, self._site)
+            self.viewer.set_mesh(carved, self._orig_name, keep_view=True)
+            self._carved = True
+        elif phase == machining.PHASE_LASER and self._carved:
+            # откат назад по прогрессу (бывает при перезапуске) — вернуть целую
+            self.viewer.set_mesh(self._orig_tris, self._orig_name, keep_view=True)
+            self._carved = False
+        tris, cols = machining.build_overlay(self._site, depth, phase, hot, sweep)
+        self.viewer.set_overlay(tris, cols)
+        tool = machining.drill_tool(self._site, depth, phase, sweep)
+        self.viewer.set_drill_tool(tool["top"], tool["tip"],
+                                   tool["phase"], tool["sparks"])
+        self.m_info.set_value(
+            machining.phase_label(phase, depth, self._site, sweep), "ok")
+
+    def stop_machining(self) -> None:
+        """Остановка/завершение: убрать инструмент и вернуть исходную модель."""
+        if not self._machining:
+            return
+        self._machining = False
+        self._carved = False
+        self.viewer.clear_overlay()
+        self.viewer.clear_drill()
+        if self._orig_tris is not None:
+            self.viewer.set_mesh(self._orig_tris, self._orig_name)
+            info = self.viewer.mesh_info()
+            sx, sy, sz = info["size"]
+            self.m_info.set_value(f"{info['name']} ({info['tris']} тр.)", "ok")
+            self.m_dims.set_value(f"{sx:.1f} × {sy:.1f} × {sz:.1f}")
+
+    def machining_motion_fractions(self):
+        """Доли рабочей зоны (X/Y), куда подвести головку — по положению устья
+        в габаритах модели. None, если модель/место не заданы."""
+        if self._site is None or self._orig_tris is None:
+            return None
+        xs = [v[0] for t in self._orig_tris for v in t]
+        ys = [v[1] for t in self._orig_tris for v in t]
+        xlo, xhi = min(xs), max(xs)
+        ylo, yhi = min(ys), max(ys)
+        p0 = self._site["p0"]
+        xf = (p0[0] - xlo) / ((xhi - xlo) or 1.0)
+        yf = (p0[1] - ylo) / ((yhi - ylo) or 1.0)
+        clamp = lambda f: max(0.15, min(0.85, f))   # держать головку на виду
+        return clamp(xf), clamp(yf)
 
     def update_head(self, xf: float, yf: float, on: bool) -> None:
         """Обновить положение головки над полем (только в режиме контура)."""
@@ -225,6 +314,11 @@ class _TablePreviewPanel(BasePanel):
     def clear(self) -> None:
         self.viewer.clear()
         self._mode = None
+        self._orig_tris = None
+        self._orig_name = ""
+        self._site = None
+        self._machining = False
+        self._carved = False
         self.m_info.set_value("не загружена", "off")
         self.m_dims.set_value("—")
 
@@ -236,6 +330,7 @@ class ProcessPage(BasePage):
         self.ctl = controller()
         self._paused = False  # последнее известное состояние паузы (для кнопки)
         self._running = None  # текущий режим (None — ещё не задан)
+        self._mach_running = False  # активна ли анимация прошивки отверстия
 
         # ── всегда сверху: панель действий ──
         self.quick = QuickActionBar("Управление процессом")
@@ -407,10 +502,18 @@ class ProcessPage(BasePage):
 
         from ..hardware import toolpath as tp_mod
         if tp_mod.is_toolpath_file(path):
+            self.ctl.set_part_loaded(False)
+            self.ctl.set_machining_motion(None, None)
             self._load_toolpath(path)
         else:
             self.ctl.clear_toolpath()
             shown = self.preview.show_mesh(path)
+            # загруженная 3D-модель — самостоятельное задание (прошивка
+            # отверстия), разрешает запуск процесса без плоского контура
+            self.ctl.set_part_loaded(shown)
+            # точка подвода головки к устью (для хода руки во время процесса)
+            self.ctl.set_machining_motion(*(self.preview.machining_motion_fractions()
+                                            or (None, None)))
             self.log.append("info", f"Выбрана 3D-модель детали: {path}")
             if shown:
                 info = self.preview.viewer.mesh_info()
@@ -421,9 +524,9 @@ class ProcessPage(BasePage):
         """Разобрать векторный контур, показать в 3D и отправить на станок."""
         from ..hardware import toolpath as tp_mod
         s = self.ctl.snapshot()
-        m, tb = s["motor"], s["table"]
-        x_range = (m["min"], m["max"])     # ход головки (X)
-        y_range = (tb["min"], tb["max"])   # ход стола (Y)
+        rng = s["arm"]["ranges"]
+        x_range = tuple(rng["x"])          # рабочая зона по X (рука)
+        y_range = tuple(rng["y"])          # рабочая зона по Y (рука)
         try:
             tp = tp_mod.load_toolpath(path)
             track, norm_segments, _ = tp_mod.fit_to_machine(tp, x_range, y_range)
@@ -445,6 +548,8 @@ class ProcessPage(BasePage):
             self.file_panel.set_file("")
             self.preview.clear()
             self.ctl.clear_toolpath()
+            self.ctl.set_part_loaded(False)
+            self.ctl.set_machining_motion(None, None)
             self.log.append("info", "Программа обработки сброшена")
 
     # ------------------------------------------------------------------
@@ -463,13 +568,27 @@ class ProcessPage(BasePage):
         f = self.file_panel.current_file()
         self.progress.update_state(proc, os.path.basename(f) if f else "")
 
-        # анимация головки над контуром: положение берём из снимка
-        # (X — головка, Y — стол), нормируем по ходу осей
-        m, tb = s["motor"], s["table"]
-        mspan = max(1, m["max"] - m["min"])
-        tspan = max(1, tb["max"] - tb["min"])
-        self.preview.update_head((m["x"] - m["min"]) / mspan,
-                                 (tb["pos"] - tb["min"]) / tspan, True)
+        # анимация головки над контуром: положение инструмента руки берём из
+        # снимка (X, Y), нормируем по рабочей зоне
+        arm = s["arm"]
+        rx, ry = arm["ranges"]["x"], arm["ranges"]["y"]
+        xspan = max(1, rx[1] - rx[0])
+        yspan = max(1, ry[1] - ry[0])
+        self.preview.update_head((arm["x"] - rx[0]) / xspan,
+                                 (arm["y"] - ry[0]) / yspan, True)
+
+        # анимация прошивки несквозного отверстия в 3D-модели детали:
+        # на запуске вырезаем устье и наводим камеру, по ходу — растим лунку
+        # (фаза 1 — лазерный рез эмали, фаза 2 — электроэрозионная прошивка),
+        # на остановке возвращаем исходную модель.
+        if running and not self._mach_running:
+            self.preview.start_machining()
+            self._mach_running = True
+        elif not running and self._mach_running:
+            self.preview.stop_machining()
+            self._mach_running = False
+        if self._mach_running:
+            self.preview.update_machining(float(proc.get("progress", 0.0)))
 
         # условия запуска
         self.conditions.r_acdc.set_state(on(s["acdc"]["on"]),
@@ -482,10 +601,14 @@ class ProcessPage(BasePage):
                                           "готов" if s["laser"]["ready"] else "не настроен")
         self.conditions.r_temp.set_state("err" if s["temp"]["over"] else "ok",
                                          "перегрев" if s["temp"]["over"] else "норма")
-        tp_loaded = s.get("toolpath", {}).get("loaded", False)
+        fixed = s["fixture"]["clamped"]
+        self.conditions.r_fix.set_state("ok" if fixed else "warn",
+                                        "зажата" if fixed else "нет")
+        job_loaded = (s.get("toolpath", {}).get("loaded", False)
+                      or s.get("part", {}).get("loaded", False))
         self.conditions.r_prog.set_state(
-            "ok" if tp_loaded else "warn",
-            "загружена" if tp_loaded else "нет")
+            "ok" if job_loaded else "warn",
+            "загружена" if job_loaded else "нет")
 
         # быстрые действия + аварии
         can_start, reason = process_readiness(s)

@@ -12,13 +12,14 @@ from .status import (
 )
 from .viewer3d import MeshViewer
 from .position_view import PositionView
+from . import machining
 
 __all__ = [
     "PrimaryButton", "DangerButton", "SmallButton", "RedButton", "GrayButton",
     "StopButton",
     "SectionTitle", "ValueLabel", "StepRow", "StepControl", "AnimatedTabBar",
     "StatusDot", "StatusBadge", "MetricRow", "MeterBar", "IndicatorRow",
-    "LastMessageBar", "MeshViewer", "PositionView",
+    "LastMessageBar", "MeshViewer", "PositionView", "machining",
 ]
 
 
