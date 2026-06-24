@@ -14,11 +14,12 @@ import os
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QVBoxLayout, QGridLayout, QWidget, QSplitter, QScrollArea, QMessageBox,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QWidget, QSplitter, QScrollArea,
+    QMessageBox, QLabel,
 )
 
 from ..base import BasePage
-from ..components import SectionTitle
+from ..components import SectionTitle, ToggleSwitch
 from ..blocks import (
     DeviceCard, AlarmPanel, EventLogPanel,
     QuickActionBar, TestHarnessPanel,
@@ -97,14 +98,14 @@ class HardwarePage(BasePage):
         c.add_metric("interlock", "Блокировки")
         self.cards["laser_psu"] = c
 
-        # Контроллер 8-суставного робота ---------------------------------
-        c = DeviceCard("Контроллер робота")
+        # Контроллер 8-суставного манипулятора ---------------------------------
+        c = DeviceCard("Контроллер манипулятора")
         c.add_metric("link", "Связь")
-        c.add_metric("speed", "Темп траектории")
+        c.add_metric("speed", "Скорость")
         self.cards["robot"] = c
 
-        # Роботизированная 8-суставная рука ------------------------------
-        c = DeviceCard("8-суставная рука")
+        # Роботизированный 8-суставной манипулятор ------------------------------
+        c = DeviceCard("8-суставной манипулятор")
         c.add_metric("tcp", "Инструмент X/Y/Z")
         c.add_metric("j14", "Суставы J1–J4")
         c.add_metric("j58", "Суставы J5–J8")
@@ -180,9 +181,23 @@ class HardwarePage(BasePage):
         v.addWidget(self.alarms)
         v.addWidget(self.log, 1)
 
-        self.harness = TestHarnessPanel() if DEV_MODE else None
-        if self.harness is not None:
-            v.addWidget(self.harness)
+        # Тумблер «Режим тестирования» открывает стендовую панель имитации
+        # сигналов датчиков (поднять температуру/ток, открыть-закрыть крышку).
+        # Панель есть всегда, но скрыта; EDM_DEV=1 лишь включает её сразу.
+        test_row = QHBoxLayout()
+        self.test_toggle = ToggleSwitch()
+        test_label = QLabel("Режим тестирования (стенд)")
+        test_label.setStyleSheet("font-weight:bold;")
+        test_row.addWidget(self.test_toggle)
+        test_row.addWidget(test_label)
+        test_row.addStretch()
+        v.addLayout(test_row)
+
+        self.harness = TestHarnessPanel()
+        self.harness.setVisible(DEV_MODE)
+        self.test_toggle.setChecked(DEV_MODE)
+        self.test_toggle.toggled.connect(self.harness.setVisible)
+        v.addWidget(self.harness)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -291,7 +306,7 @@ class HardwarePage(BasePage):
             ilk_txt, ilk_role = "ожидание готовности", "off"
         card.set_metric("interlock", ilk_txt, ilk_role)
 
-        # Контроллер робота ----------------------------------------------
+        # Контроллер манипулятора ----------------------------------------------
         rc = s["robot"]; card = self.cards["robot"]
         if not rc["online"]:
             card.set_state("Нет связи", "warn")
@@ -303,7 +318,7 @@ class HardwarePage(BasePage):
                             "ok" if rc["enabled"] else "off")
         card.set_metric("speed", str(rc["speed"]), "ok")
 
-        # 8-суставная рука -----------------------------------------------
+        # 8-суставной манипулятор -----------------------------------------------
         arm = s["arm"]; card = self.cards["arm"]
         card.set_state("Движение" if arm["moving"] else "Стоп",
                        "warn" if arm["moving"] else "off")
@@ -311,7 +326,7 @@ class HardwarePage(BasePage):
         j = arm["joints"]
         card.set_metric("j14", "  ".join(f"{n} {j[n]:.0f}°" for n in ("J1", "J2", "J3", "J4")))
         card.set_metric("j58", "  ".join(f"{n} {j[n]:.0f}°" for n in ("J5", "J6", "J7", "J8")))
-        card.set_metric("moving", "движется" if arm["moving"] else "остановлена",
+        card.set_metric("moving", "движется" if arm["moving"] else "остановлен",
                         "warn" if arm["moving"] else "off")
 
         # Рабочая головка ------------------------------------------------

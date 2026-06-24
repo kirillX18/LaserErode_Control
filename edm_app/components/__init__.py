@@ -12,6 +12,7 @@ from .status import (
 )
 from .viewer3d import MeshViewer
 from .position_view import PositionView
+from .toggle import ToggleSwitch
 from . import machining
 
 __all__ = [
@@ -19,7 +20,7 @@ __all__ = [
     "StopButton",
     "SectionTitle", "ValueLabel", "StepRow", "StepControl", "AnimatedTabBar",
     "StatusDot", "StatusBadge", "MetricRow", "MeterBar", "IndicatorRow",
-    "LastMessageBar", "MeshViewer", "PositionView", "machining",
+    "LastMessageBar", "MeshViewer", "PositionView", "ToggleSwitch", "machining",
 ]
 
 

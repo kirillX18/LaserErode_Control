@@ -14,7 +14,9 @@ theme.py (цвета не зашиты в виджеты):
 """
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QLabel, QWidget, QHBoxLayout, QProgressBar
+from PyQt5.QtWidgets import (
+    QLabel, QWidget, QHBoxLayout, QProgressBar, QSizePolicy,
+)
 
 from .. import theme
 
@@ -44,19 +46,67 @@ class StatusBadge(QLabel):
         self.setStyleSheet(theme.badge_style(state))
 
 
-class MetricRow(QWidget):
-    """Строка «подпись … значение» с возможностью подкрасить значение."""
+class _ElidingLabel(QLabel):
+    """QLabel, сокращающая длинный текст многоточием по ширине виджета.
 
-    def __init__(self, label: str, value: str = "—", parent=None):
+    Обычная QLabel сообщает компоновке минимальную ширину, равную ширине
+    ПОЛНОГО текста. Из-за этого длинная строка (например, путь к файлу)
+    раздвигает колонку и не даёт сжимать окно. Эта метка хранит полный текст
+    отдельно, отображает усечённый вариант и через политику размера Ignored
+    не навязывает компоновке свою «полную» ширину — поэтому может сжиматься
+    до нуля, а полный текст доступен во всплывающей подсказке.
+    """
+
+    def __init__(self, text: str = "", mode=Qt.ElideMiddle, parent=None):
+        super().__init__(parent)
+        self._full = str(text)
+        self._mode = mode
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.setMinimumWidth(0)
+        self._apply()
+
+    def setText(self, text) -> None:           # noqa: N802 (Qt-стиль)
+        self._full = str(text)
+        self.setToolTip(self._full if self._full not in ("", "—") else "")
+        self._apply()
+
+    def text(self) -> str:                     # вернуть полный, а не усечённый
+        return self._full
+
+    def _apply(self) -> None:
+        fm = self.fontMetrics()
+        super().setText(fm.elidedText(self._full, self._mode, max(0, self.width())))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply()
+
+
+class MetricRow(QWidget):
+    """Строка «подпись … значение» с возможностью подкрасить значение.
+
+    При elide=True значение усекается многоточием и не растягивает строку по
+    ширине (для путей, имён файлов и прочих потенциально длинных значений).
+    """
+
+    def __init__(self, label: str, value: str = "—", parent=None,
+                 elide: bool = False):
         super().__init__(parent)
         h = QHBoxLayout(self)
         h.setContentsMargins(0, 1, 0, 1)
         self._key = QLabel(label)
-        self._val = QLabel(value)
-        self._val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        h.addWidget(self._key)
-        h.addStretch()
-        h.addWidget(self._val)
+        self._elide = elide
+        if elide:
+            self._val = _ElidingLabel(value, Qt.ElideMiddle)
+            self._val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            h.addWidget(self._key)
+            h.addWidget(self._val, 1)   # значение занимает остаток и сжимается
+        else:
+            self._val = QLabel(value)
+            self._val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            h.addWidget(self._key)
+            h.addStretch()
+            h.addWidget(self._val)
 
     def set_value(self, value, state: str | None = None) -> None:
         self._val.setText(str(value))

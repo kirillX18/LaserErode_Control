@@ -79,7 +79,7 @@ def process_readiness(s: dict):
         (s["lid"]["closed"],    "Закройте крышку рабочей зоны"),
         (not s["temp"]["over"], "Перегрев — дождитесь остывания"),
         (s["laser"]["ready"],   "Настройте лазер (задайте мощность > 0 Вт)"),
-        (s["robot"]["online"],  "Контроллер робота не на связи"),
+        (s["robot"]["online"],  "Контроллер манипулятора не на связи"),
         (s["fixture"]["clamped"], "Зафиксируйте деталь в креплении"),
         (s.get("toolpath", {}).get("loaded", False)
             or s.get("part", {}).get("loaded", False),
@@ -120,7 +120,7 @@ def _compute_alarms(s: dict) -> list:
         out.append(("warn", "Лазер не настроен (мощность 0 Вт)",
                     "laser.is_ready()"))
     if s["acdc"]["on"] and not s["robot"]["online"] and not s["process_running"]:
-        out.append(("warn", "Контроллер робота не на связи",
+        out.append(("warn", "Контроллер манипулятора не на связи",
                     "robot_controller.online"))
     if s["acdc"]["on"] and not s["fixture"]["clamped"] and not s["process_running"]:
         out.append(("warn", "Деталь не зафиксирована в креплении",
@@ -153,7 +153,7 @@ class _HardwareWorker(QObject):
         self.process = ProcessController(self.hw)
         self.test = TestHarness(self.hw, self.process)
 
-        # Фоновое движение руки остаётся включённым: стаб сам имитирует ход в
+        # Фоновое движение манипулятора остаётся включённым: стаб сам имитирует ход в
         # своём потоке, индикатор «движется» виден до завершения. Поток воркера
         # при этом свободен.
         self.hw.arm.set_async_motion(True, scale=0.4)
@@ -181,7 +181,7 @@ class _HardwareWorker(QObject):
             "set_machining_motion": self.process.set_machining_motion,
             "set_laser_param": self.hw.laser.set_param,
             "set_laser_mode": self.hw.laser.set_mode,
-            # --- рука и контроллер робота ---
+            # --- манипулятор и контроллер манипулятора ---
             "set_speed": self.process.set_arm_speed,
             "set_arm_speed": self.process.set_arm_speed,
             "move_to": self.process.move_tool_to,
@@ -191,7 +191,7 @@ class _HardwareWorker(QObject):
             "home_arm": self._home_arm,
             "stop_motor": self.hw.arm.stop,
             "stop_arm": self.hw.arm.stop,
-            # --- совместимость со старым «столом» (Y теперь — ось руки) ---
+            # --- совместимость со старым «столом» (Y теперь — ось манипулятора) ---
             "move_table": self._move_table_compat,
             "set_table_speed": self.process.set_arm_speed,
             "reset_table": self._home_arm,
@@ -218,7 +218,7 @@ class _HardwareWorker(QObject):
         return self.hw.arm.home()
 
     def _move_table_compat(self, y):
-        """Старая команда «стол по Y» — теперь это перемещение руки по оси Y."""
+        """Старая команда «стол по Y» — теперь это перемещение манипулятора по оси Y."""
         return self.process.move_tool_to(y=y)
 
     def _simulate_current(self, v):
@@ -308,14 +308,14 @@ class _HardwareWorker(QObject):
                 "v": hw.laser_power_supply.get_voltage(),
             },
             "lid": {"closed": hw.lid_sensor.is_closed()},
-            # Контроллер 8-суставного робота.
+            # Контроллер 8-суставного манипулятора.
             "robot": {
                 "online": rc.online,
                 "enabled": rc.enabled,
                 "moving": rc.moving,
                 "speed": rc.speed,
             },
-            # Роботизированная 8-суставная рука: положение инструмента + суставы.
+            # Роботизированный 8-суставной манипулятор: положение инструмента + суставы.
             "arm": {
                 "x": arm.tool["x"], "y": arm.tool["y"], "z": arm.tool["z"],
                 "ranges": {a: list(arm.ranges[a]) for a in arm.AXES},
@@ -358,8 +358,8 @@ class _HardwareWorker(QObject):
 
             # ----------------------------------------------------------------
             # Обратная совместимость со старым UI (ШД + стол + источник 48 В).
-            # Позиционирование теперь выполняет рука: X/Z — оси инструмента,
-            # Y — третья ось руки (бывший «стол»). Источник «psu» = источник
+            # Позиционирование теперь выполняет манипулятор: X/Z — оси инструмента,
+            # Y — третья ось манипулятора (бывший «стол»). Источник «psu» = источник
             # эрозии. Эти алиасы позволяют существующим вкладкам работать без
             # правок до их миграции на ключи arm/robot/edm/water/fixture.
             # ----------------------------------------------------------------
@@ -487,7 +487,7 @@ class DeviceController(QObject):
     def acdc_off(self): self._request("acdc_off")
 
     # ------------------------------------------------------------------
-    # Ось Y руки (бывший координатный стол — оставлен для совместимости UI)
+    # Ось Y манипулятора (бывший координатный стол — оставлен для совместимости UI)
     # ------------------------------------------------------------------
     def move_table(self, pos):       self._request("move_table", pos)
     def set_table_speed(self, v):    self._request("set_table_speed", v)

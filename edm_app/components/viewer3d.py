@@ -620,9 +620,12 @@ class MeshViewer(QWidget):
         qp.drawEllipse(p, 5, 5)
 
     def _draw_axes(self, qp: QPainter) -> None:
-        L = (self._extent if (self._tris or self._toolpath is not None)
-             else 6.0) * 0.55
-        o = self._center
+        has_content = bool(self._tris) or self._toolpath is not None
+        half = self._extent * 0.9 if has_content else 6.0
+        L = (self._extent if has_content else 6.0) * 0.55
+        # Начало координат выносим в ближний угол стола, а не в центр:
+        # деталь по-прежнему загружается по середине, оси ей не мешают.
+        o = (self._center[0] - half, self._center[1] - half, self._center[2])
         origin, _ = self._project(o)
         axes = [((o[0] + L, o[1], o[2]), QColor("#e25555"), "X"),
                 ((o[0], o[1] + L, o[2]), QColor("#55cc55"), "Y"),

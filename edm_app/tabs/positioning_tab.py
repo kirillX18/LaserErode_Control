@@ -1,7 +1,7 @@
 """
 positioning_tab.py — вкладка «Позиционирование».
 
-Управление положением рабочей головки роботизированной 8-суставной рукой
+Управление положением рабочей головки роботизированным 8-суставным манипулятором
 (заменяет прежние «Шаговый привод» и «Координатный стол»).
 
     слева  — задание положения инструмента (TCP) по X / Y / Z и пульт суставов
@@ -9,8 +9,8 @@ positioning_tab.py — вкладка «Позиционирование».
     справа — 3D-визуализация положения инструмента и луча над зоной обработки.
 
 Соответствие узлам устройства из заглушек:
-    X, Y, Z — оси инструмента руки (move_tool, snapshot["arm"]);
-    J1…J8   — суставы руки (move_joint), у каждого своё ограничение угла.
+    X, Y, Z — оси инструмента манипулятора (move_tool, snapshot["arm"]);
+    J1…J8   — суставы манипулятора (move_joint), у каждого своё ограничение угла.
 
 Все действия идут через DeviceController; перемещение до инициализации и во
 время процесса блокируется логикой стабов, результат виден в строке снизу.
@@ -104,20 +104,20 @@ class PositioningTab(BaseServiceTab):
         self.move_btn = PrimaryButton("Переместить")
         g.addWidget(self.move_btn, 6, 2, 3, 1)
 
-        g.addWidget(QLabel("Толчком X:"), 9, 0)
+        g.addWidget(QLabel("Смещение X:"), 9, 0)
         g.addWidget(StepControl(self.JOG_STEPS, self._jog_x, label_fmt="{:g}",
                                 label_first=True, minus_red=False), 9, 1, 1, 2)
-        g.addWidget(QLabel("Толчком Y:"), 10, 0)
-        g.addWidget(StepControl((1, 10, 50), self._jog_y, label_fmt="{:g}",
+        g.addWidget(QLabel("Смещение Y:"), 10, 0)
+        g.addWidget(StepControl(self.JOG_STEPS, self._jog_y, label_fmt="{:g}",
                                 label_first=True, minus_red=False), 10, 1, 1, 2)
-        g.addWidget(QLabel("Толчком Z:"), 11, 0)
+        g.addWidget(QLabel("Смещение Z:"), 11, 0)
         g.addWidget(StepControl(self.JOG_STEPS, self._jog_z, label_fmt="{:g}",
                                 label_first=True, minus_red=False), 11, 1, 1, 2)
         g.setColumnStretch(1, 1)
         return box
 
     def _build_joints_box(self) -> QGroupBox:
-        box = QGroupBox("Суставы руки (J1…J8)")
+        box = QGroupBox("Суставы манипулятора (J1…J8)")
         g = QGridLayout(box)
         g.addWidget(QLabel("Сустав"), 0, 0)
         g.addWidget(QLabel("Текущий угол"), 0, 1)
@@ -137,9 +137,9 @@ class PositioningTab(BaseServiceTab):
         return box
 
     def _build_speed_box(self) -> QGroupBox:
-        box = QGroupBox("Темп отработки траектории (задаётся на «Параметрах устройства»)")
+        box = QGroupBox("Скорость (задаётся на «Параметрах устройства»)")
         g = QGridLayout(box)
-        self.speed_row = MetricRow("Темп контроллера робота:", "—")
+        self.speed_row = MetricRow("Скорость манипулятора:", "—")
         g.addWidget(self.speed_row, 0, 0, 1, 3)
         g.setColumnStretch(1, 1)
         return box

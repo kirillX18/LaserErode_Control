@@ -390,8 +390,13 @@ class GLMeshViewer(QOpenGLWidget):
 
     def _draw_axes(self):
         from OpenGL.GL import glColor3f, glBegin, glEnd, glVertex3f, glLineWidth, GL_LINES
-        L = (self._extent if (self._nverts or self._toolpath) else 6.0) * 0.55
-        ox, oy, oz = self._center
+        has_content = bool(self._nverts or self._toolpath)
+        half = self._extent * 0.9 if has_content else 6.0
+        L = (self._extent if has_content else 6.0) * 0.55
+        # Начало координат — в ближнем углу стола (деталь остаётся в центре).
+        ox = self._center[0] - half
+        oy = self._center[1] - half
+        oz = self._center[2]
         glLineWidth(2.0)
         glBegin(GL_LINES)
         glColor3f(0.89, 0.33, 0.33); glVertex3f(ox, oy, oz); glVertex3f(ox + L, oy, oz)

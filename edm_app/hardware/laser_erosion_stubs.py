@@ -13,14 +13,14 @@
 обработку):
     AC/DC преобразователь            — питание логики 24 В;
     Блок транзисторных ключей        — коммутация силовых нагрузок:
-                                       приводы руки, лазер, эрозия, подача воды;
+                                       приводы манипулятора, лазер, эрозия, подача воды;
     Источник питания эрозии          — напряжение на катод/анод, защита от
                                        перегрузки по току;
     Источник питания лазера          — питание лазерного излучателя, включается
                                        только при закрытой крышке и готовности;
-    Роботизированная 8-суставная рука — позиционирование рабочей головки
+    Роботизированный 8-суставной манипулятор — позиционирование рабочей головки
                                        (заменяет шаговые приводы и стол);
-    Контроллер 8-суставного робота   — движение суставов J1…J8 и траектория;
+    Контроллер 8-суставного манипулятора   — движение суставов J1…J8 и траектория;
     Лазерно-эрозионная рабочая головка — узел из:
         лазерный излучатель          — параметры с вкладки «Лазером»;
         эрозионный катод             — электроэрозионное воздействие;
@@ -53,7 +53,7 @@ logger = logging.getLogger("hardware")
 
 class TransistorChannel(str, Enum):
     """Каналы блока транзисторных ключей (силовые нагрузки)."""
-    ARM_DRIVES = "arm_drives"   # питание приводов суставов роботизированной руки
+    ARM_DRIVES = "arm_drives"   # питание приводов суставов роботизированного манипулятора
     EDM        = "edm"          # разрешение источника эрозии (катод/анод)
     LASER      = "laser"        # подача питания на лазерный излучатель
     WATER      = "water"        # питание насоса/клапана подачи воды
@@ -125,7 +125,7 @@ class TransistorSwitchBlockStub:
     Питание на нагрузку идёт, когда: транзистор открыт И есть силовое питание.
 
     Коммутирует силовые нагрузки лазерно-эрозионного робота:
-        приводы суставов руки, лазер, эрозионный процесс, подача воды.
+        приводы суставов манипулятора, лазер, эрозионный процесс, подача воды.
     """
 
     def __init__(self):
@@ -135,7 +135,7 @@ class TransistorSwitchBlockStub:
         self.channels: dict[TransistorChannel, dict] = {
             TransistorChannel.ARM_DRIVES: {
                 "control_signal": 0, "transistor_open": False, "load_enabled": False,
-                "description": "Питание приводов суставов руки",
+                "description": "Питание приводов суставов манипулятора",
             },
             TransistorChannel.EDM: {
                 "control_signal": 0, "transistor_open": False, "load_enabled": False,
@@ -393,12 +393,12 @@ class LidSensorStub:
 
 
 # ============================================================
-# Контроллер 8-суставного робота
+# Контроллер 8-суставного манипулятора
 # ============================================================
 
 class RobotControllerStub:
     """
-    Контроллер 8-суставного робота.
+    Контроллер 8-суставного манипулятора.
     Заменяет управление шаговым приводом. Выходит на связь (online) по
     логическому питанию, разрешает движение суставов (enabled) при наличии
     питания приводов, задаёт скорость отработки траектории. Отвечает за
@@ -406,11 +406,11 @@ class RobotControllerStub:
     """
 
     def __init__(self):
-        self.name = "Контроллер робота"
+        self.name = "Контроллер манипулятора"
         self.online = False        # есть ли связь с контроллером
         self.enabled = False       # разрешено ли движение суставов
         self.moving = False
-        self.speed = 100           # темп отработки траектории, усл. ед.
+        self.speed = 100           # скорость отработки траектории, усл. ед.
         self.direction = 0
 
     def connect(self) -> bool:
@@ -445,7 +445,7 @@ class RobotControllerStub:
             logger.error(f"{self.name}: скорость должна быть > 0")
             return False
         self.speed = int(value)
-        logger.info(f"{self.name}: темп траектории {self.speed}")
+        logger.info(f"{self.name}: скорость {self.speed}")
         return True
 
     def start_motion(self, direction: int) -> bool:
@@ -466,26 +466,26 @@ class RobotControllerStub:
 
     def get_status(self) -> str:
         if not self.online:
-            return "Контроллер робота: нет связи"
+            return "Контроллер манипулятора: нет связи"
         if not self.enabled:
-            return f"Контроллер робота: на связи, движение запрещено. Темп: {self.speed}"
+            return f"Контроллер манипулятора: на связи, движение запрещено. Скорость: {self.speed}"
         if self.moving:
-            return f"Контроллер робота: отработка траектории, темп {self.speed}"
-        return f"Контроллер робота: готов, темп {self.speed}"
+            return f"Контроллер манипулятора: отработка траектории, скорость {self.speed}"
+        return f"Контроллер манипулятора: готов, скорость {self.speed}"
 
     def __repr__(self) -> str:
         return f"<RobotController online={self.online} enabled={self.enabled}>"
 
 
 # ============================================================
-# Роботизированная 8-суставная рука
+# Роботизированный 8-суставной манипулятор
 # ============================================================
 
 class RoboticArmStub:
     """
-    Роботизированная рука с 8 суставами (J1…J8). Заменяет шаговые приводы и
+    Роботизированный манипулятор с 8 суставами (J1…J8). Заменяет шаговые приводы и
     координатный стол: позиционирование рабочей головки по трём осям рабочей
-    зоны (X, Y, Z) выполняется рукой.
+    зоны (X, Y, Z) выполняется манипулятором.
 
     Каждый сустав имеет привод, датчик положения (текущий угол) и ограничение
     угла поворота (min/max). Движением суставов и отработкой траектории
@@ -494,7 +494,7 @@ class RoboticArmStub:
     Положение инструмента (TCP) — авторитетные декартовы координаты рабочей
     зоны; углы суставов в этой модели рассчитываются детерминированно по
     положению инструмента (упрощённая обратная задача), остаются в пределах
-    ограничений и служат для отображения позы руки.
+    ограничений и служат для отображения позы манипулятора.
 
     Движение может быть мгновенным (unit-тесты) или фоновым (set_async_motion).
     """
@@ -515,7 +515,7 @@ class RoboticArmStub:
 
     def __init__(self,
                  x_range=(0, 1000), y_range=(0, 500), z_range=(0, 400)):
-        self.name = "8-суставная рука"
+        self.name = "8-суставной манипулятор"
         self.controller: Optional[RobotControllerStub] = None
         self.moving = False
         self.tool = {"x": 0, "y": 0, "z": 0}
@@ -657,7 +657,7 @@ class RoboticArmStub:
         return True
 
     def home(self) -> bool:
-        """Вернуть руку в исходную позу (центр X/Y, верх Z)."""
+        """Вернуть манипулятор в исходную позу (центр X/Y, верх Z)."""
         if self.moving:
             logger.error(f"{self.name}: нельзя домой во время движения")
             return False
@@ -678,9 +678,9 @@ class RoboticArmStub:
 
     def get_status(self) -> str:
         if self.controller is None:
-            return "Рука: контроллер не назначен"
-        state = "движется" if self.moving else "остановлена"
-        return (f"Рука {state}, инструмент "
+            return "Манипулятор: контроллер не назначен"
+        state = "движется" if self.moving else "остановлен"
+        return (f"Манипулятор {state}, инструмент "
                 f"X={self.tool['x']:.0f}, Y={self.tool['y']:.0f}, Z={self.tool['z']:.0f}")
 
     def __repr__(self) -> str:
@@ -1001,7 +1001,7 @@ class WorkingHeadStub:
 class WorkpieceFixtureStub:
     """
     Крепление детали — неподвижное основание для фиксации заготовки во время
-    обработки. Позиционирование полностью выполняет 8-суставная рука, поэтому
+    обработки. Позиционирование полностью выполняет 8-суставной манипулятор, поэтому
     стол не перемещается — он только удерживает (зажимает) деталь.
     """
 
@@ -1097,7 +1097,7 @@ class HardwareRegistry:
             initial=initial_temperature, max_temperature=max_temperature,
         )
 
-        # Позиционирование: контроллер робота + 8-суставная рука
+        # Позиционирование: контроллер манипулятора + 8-суставной манипулятор
         self.robot_controller  = RobotControllerStub()
         self.arm               = RoboticArmStub()
 
@@ -1120,14 +1120,14 @@ class HardwareRegistry:
         self.laser.set_param("pulse", 100)                   # 100 мкс
         self.laser.set_param("exposure", 1000)               # 1000 мс
 
-        # Исходная поза руки: инструмент в центре рабочей зоны, вверху по Z.
+        # Исходная поза манипулятора: инструмент в центре рабочей зоны, вверху по Z.
         a = self.arm
         a.tool["x"] = (a.ranges["x"][0] + a.ranges["x"][1]) / 2
         a.tool["y"] = (a.ranges["y"][0] + a.ranges["y"][1]) / 2
         a.tool["z"] = a.ranges["z"][1]
         a._sync_joints()
 
-        # Темп отработки траектории — выставляем сразу (повторно подтвердится в init).
+        # Скорость отработки траектории — выставляем сразу (повторно подтвердится в init).
         self.robot_controller.set_speed(arm_speed)
 
         # Стартовые настройки — применяются при init.
@@ -1136,7 +1136,7 @@ class HardwareRegistry:
 
     def apply_initial_state(self) -> None:
         """Подготавливает железо в стартовое состояние (вызывается при init)."""
-        # Рука + контроллер робота
+        # Рука + контроллер манипулятора
         self.arm.attach_controller(self.robot_controller)
         self.robot_controller.set_speed(self._initial_arm_speed)
         # Лазер: стартовая мощность
@@ -1165,7 +1165,7 @@ class ProcessController:
         self.progress = 0.0
 
         # Программа обработки — плоский контур в координатах рабочей зоны:
-        #   точки (X, Y). По нему рука ведёт головку во время процесса.
+        #   точки (X, Y). По нему манипулятор ведёт головку во время процесса.
         self.toolpath: list = []     # [(X, Y), …]
         self._tp_cum: list = []
         self._tp_total: float = 0.0
@@ -1208,7 +1208,7 @@ class ProcessController:
 
     def set_machining_motion(self, xf=None, yf=None) -> bool:
         """Задать точку подвода головки для прошивки (доли рабочей зоны X/Y),
-        либо сбросить (xf=None). По ней рука ведёт инструмент во время процесса."""
+        либо сбросить (xf=None). По ней манипулятор ведёт инструмент во время процесса."""
         if xf is None or yf is None:
             self._mach_motion = None
         else:
@@ -1217,7 +1217,7 @@ class ProcessController:
         return True
 
     def _drive_machining_head(self) -> None:
-        """Двигать инструмент руки по ходу прошивки: быстрый подвод по X/Y к
+        """Двигать инструмент манипулятора по ходу прошивки: быстрый подвод по X/Y к
         точке отверстия, затем опускание по Z (фаза лазера — у поверхности,
         фаза эрозии — заглубление). Делает движение заглушки видимым и
         согласованным в показе детали и на вкладке «Позиционирование»."""
@@ -1275,8 +1275,8 @@ class ProcessController:
         self.hw.apply_initial_state()
         self.hw.transistors.set_load_power(True)
 
-        # Контроллер робота выходит на связь и разрешает наладочные движения.
-        # Питание приводов руки — через транзисторный ключ ARM_DRIVES.
+        # Контроллер манипулятора выходит на связь и разрешает наладочные движения.
+        # Питание приводов манипулятора — через транзисторный ключ ARM_DRIVES.
         self.hw.transistors.turn_on(TransistorChannel.ARM_DRIVES)
         arm_power = self.hw.transistors.is_channel_on(TransistorChannel.ARM_DRIVES)
         self.hw.robot_controller.connect()
@@ -1321,7 +1321,7 @@ class ProcessController:
             logger.error("Лазер не настроен (мощность 0 Вт)")
             return False
         if not self.hw.robot_controller.online:
-            logger.error("Контроллер робота не на связи")
+            logger.error("Контроллер манипулятора не на связи")
             return False
         if not self.hw.fixture.is_clamped():
             logger.error("Деталь не зафиксирована в креплении")
@@ -1493,12 +1493,12 @@ class ProcessController:
         self.initialized = False
         return True
 
-    # ---- движение руки (наладка) ----
+    # ---- движение манипулятора (наладка) ----
     def move_tool_to(self, x=None, y=None, z=None) -> bool:
         if not self._require_initialized():
             return False
         if self.process_running:
-            logger.error("Нельзя двигать руку во время процесса")
+            logger.error("Нельзя двигать манипулятор во время процесса")
             return False
         if not self.hw.robot_controller.enabled:
             self.hw.robot_controller.enable(
@@ -1598,7 +1598,7 @@ class ProcessController:
             f"[Источник эрозии] {self.hw.edm_power_supply.get_status()}",
             f"[Источник лазера] {self.hw.laser_power_supply.get_status()}",
             f"[Крышка] {self.hw.lid_sensor.get_status()}",
-            f"[Контроллер робота] {self.hw.robot_controller.get_status()}",
+            f"[Контроллер манипулятора] {self.hw.robot_controller.get_status()}",
             f"[Рука] {a.get_status()}",
             f"  суставы: {joints}",
             f"[Головка] {self.hw.head.get_status()}",

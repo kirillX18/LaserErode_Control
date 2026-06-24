@@ -56,8 +56,8 @@ class _ProcessFilePanel(BasePanel):
 
     def build(self) -> None:
         self._path = ""
-        self.m_file = MetricRow("Модель:", "не выбрана")
-        self.m_path = MetricRow("Путь:", "—")
+        self.m_file = MetricRow("Модель:", "не выбрана", elide=True)
+        self.m_path = MetricRow("Путь:", "—", elide=True)
         self.body.addWidget(self.m_file)
         self.body.addWidget(self.m_path)
 
@@ -190,8 +190,8 @@ class _TablePreviewPanel(BasePanel):
         self._site = None          # параметры устья (machining.pick_drill_site)
         self._machining = False    # идёт ли анимация прошивки
         self._carved = False       # вскрыто ли уже устье (фаза эрозии)
-        self.m_info = MetricRow("Программа:", "не загружена")
-        self.m_dims = MetricRow("Контур / габариты:", "—")
+        self.m_info = MetricRow("Программа:", "не загружена", elide=True)
+        self.m_dims = MetricRow("Контур / габариты:", "—", elide=True)
         self.body.addWidget(self.m_info)
         self.body.addWidget(self.m_dims)
 
@@ -369,7 +369,7 @@ class ProcessPage(BasePage):
         self.conditions.r_init.set_fix_action(
             "выполнить →", self.ctl.initialize)
         self.conditions.r_laser.set_fix_action(
-            "настроить →", lambda: self._goto("Сервисное управление", "Лазером"))
+            "настроить →", lambda: self._goto("Сервисное управление", "Настройка лазера"))
         self.conditions.r_acdc.set_fix_action(
             "показать →", lambda: self._goto("Узлы оборудования"))
         self.conditions.r_lid.set_fix_action(
@@ -511,7 +511,7 @@ class ProcessPage(BasePage):
             # загруженная 3D-модель — самостоятельное задание (прошивка
             # отверстия), разрешает запуск процесса без плоского контура
             self.ctl.set_part_loaded(shown)
-            # точка подвода головки к устью (для хода руки во время процесса)
+            # точка подвода головки к устью (для хода манипулятора во время процесса)
             self.ctl.set_machining_motion(*(self.preview.machining_motion_fractions()
                                             or (None, None)))
             self.log.append("info", f"Выбрана 3D-модель детали: {path}")
@@ -525,8 +525,8 @@ class ProcessPage(BasePage):
         from ..hardware import toolpath as tp_mod
         s = self.ctl.snapshot()
         rng = s["arm"]["ranges"]
-        x_range = tuple(rng["x"])          # рабочая зона по X (рука)
-        y_range = tuple(rng["y"])          # рабочая зона по Y (рука)
+        x_range = tuple(rng["x"])          # рабочая зона по X (манипулятор)
+        y_range = tuple(rng["y"])          # рабочая зона по Y (манипулятор)
         try:
             tp = tp_mod.load_toolpath(path)
             track, norm_segments, _ = tp_mod.fit_to_machine(tp, x_range, y_range)
@@ -568,7 +568,7 @@ class ProcessPage(BasePage):
         f = self.file_panel.current_file()
         self.progress.update_state(proc, os.path.basename(f) if f else "")
 
-        # анимация головки над контуром: положение инструмента руки берём из
+        # анимация головки над контуром: положение инструмента манипулятора берём из
         # снимка (X, Y), нормируем по рабочей зоне
         arm = s["arm"]
         rx, ry = arm["ranges"]["x"], arm["ranges"]["y"]

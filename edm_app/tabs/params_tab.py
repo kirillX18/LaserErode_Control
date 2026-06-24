@@ -2,7 +2,7 @@
 params_tab.py — вкладка «Параметры устройства».
 
 Изменяемые параметры узлов лазерно-эрозионного робота: лимит тока источника
-эрозии, порог перегрева, темп отработки траектории контроллером робота. Слева —
+эрозии, порог перегрева, скорость отработки траектории контроллером манипулятора. Слева —
 текущие значения, в форме — задание новых. Всё идёт через DeviceController.
 """
 
@@ -20,7 +20,7 @@ class _CurrentValues(BasePanel):
     def build(self) -> None:
         self.m_limit = MetricRow("Лимит тока (эрозия):", "—")
         self.m_temp = MetricRow("Порог перегрева:", "—")
-        self.m_speed = MetricRow("Темп траектории:", "—")
+        self.m_speed = MetricRow("Скорость:", "—")
         for m in (self.m_limit, self.m_temp, self.m_speed):
             self.body.addWidget(m)
 
@@ -39,7 +39,7 @@ class ParametersTab(BaseServiceTab):
         self.form.add_row("maxtemp", "Порог перегрева, °C", lo=1, hi=200,
                           value=80, step=1, decimals=0,
                           callback=self.ctl.set_max_temp)
-        self.form.add_row("speed", "Темп траектории робота", lo=1, hi=5000,
+        self.form.add_row("speed", "Скорость манипулятора", lo=1, hi=5000,
                           value=150, step=10, decimals=0,
                           callback=lambda v: self.ctl.set_arm_speed(int(v)))
         layout.addWidget(self.form)

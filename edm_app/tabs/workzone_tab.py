@@ -10,7 +10,9 @@ workzone_tab.py — вкладка «Рабочая зона».
 через DeviceController, результат виден в строке снизу и в показаниях датчиков.
 """
 
-from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QGridLayout
+from PyQt5.QtWidgets import (
+    QVBoxLayout, QHBoxLayout, QGridLayout, QWIDGETSIZE_MAX,
+)
 
 from ..base import BaseServiceTab, BasePanel
 from ..components import (
@@ -40,6 +42,10 @@ class _WaterPanel(BasePanel):
         row1 = QHBoxLayout()
         self.supply_on = PrimaryButton("Включить подачу")
         self.supply_off = GrayButton("Остановить подачу")
+        # Снимаем компактный лимит ширины GrayButton (90 px) — он рассчитан на
+        # короткие подписи и обрезает длинный текст этих кнопок; в строке из
+        # двух кнопок они сами делят ширину поровну.
+        self.supply_off.setMaximumWidth(QWIDGETSIZE_MAX)
         row1.addWidget(self.supply_on)
         row1.addWidget(self.supply_off)
         self.body.addLayout(row1)
@@ -47,6 +53,8 @@ class _WaterPanel(BasePanel):
         row2 = QHBoxLayout()
         self.drain_on = GrayButton("Открыть слив")
         self.drain_off = GrayButton("Закрыть слив")
+        self.drain_on.setMaximumWidth(QWIDGETSIZE_MAX)
+        self.drain_off.setMaximumWidth(QWIDGETSIZE_MAX)
         row2.addWidget(self.drain_on)
         row2.addWidget(self.drain_off)
         self.body.addLayout(row2)
@@ -91,6 +99,7 @@ class _FixturePanel(BasePanel):
         row = QHBoxLayout()
         self.clamp_btn = PrimaryButton("Зажать деталь")
         self.release_btn = GrayButton("Освободить")
+        self.release_btn.setMaximumWidth(QWIDGETSIZE_MAX)
         row.addWidget(self.clamp_btn)
         row.addWidget(self.release_btn)
         self.body.addLayout(row)
